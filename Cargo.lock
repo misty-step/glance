@@ -295,6 +295,7 @@ dependencies = [
  "glance-check",
  "glance-core",
  "glance-gen",
+ "glance-publish",
  "serde",
  "tempfile",
  "toml",
@@ -323,6 +324,14 @@ name = "glance-gen"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "glance-publish"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
 ]
 
 [[package]]

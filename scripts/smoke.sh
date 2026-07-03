@@ -30,6 +30,34 @@ cargo run -q -p glance -- check \
   > "$tmpdir/check.out"
 grep -q 'checked 2 citations' "$tmpdir/check.out"
 
+mkdir -p "$tmpdir/publish-site/src/parser"
+printf '<!doctype html><p>root</p>' > "$tmpdir/publish-site/index.html"
+printf '<!doctype html><p>parser</p>' > "$tmpdir/publish-site/src/parser/index.html"
+printf '{"smoke":true}\n' > "$tmpdir/publish-site/metadata.json"
+git init --bare "$tmpdir/smoke-glance.git" >/dev/null
+cargo run -q -p glance -- publish \
+  --site-dir "$tmpdir/publish-site" \
+  --source-owner misty-step \
+  --source-name smoke \
+  --source-sha "$sha" \
+  --mode master \
+  --sister-remote "file://$tmpdir/smoke-glance.git" \
+  --sister-worktree "$tmpdir/smoke-glance-worktree" \
+  --run-id smoke \
+  > "$tmpdir/publish-1.out"
+grep -q 'changed=true' "$tmpdir/publish-1.out"
+cargo run -q -p glance -- publish \
+  --site-dir "$tmpdir/publish-site" \
+  --source-owner misty-step \
+  --source-name smoke \
+  --source-sha "$sha" \
+  --mode master \
+  --sister-remote "file://$tmpdir/smoke-glance.git" \
+  --sister-worktree "$tmpdir/smoke-glance-worktree" \
+  --run-id smoke \
+  > "$tmpdir/publish-2.out"
+grep -q 'changed=false' "$tmpdir/publish-2.out"
+
 printf 'source_sha = "fixture-sha"\n' > "$tmpdir/glance.toml"
 cargo run -q -p glance -- --config "$tmpdir/glance.toml" run \
   --root crates/glance-core/tests/fixtures/mini-source \

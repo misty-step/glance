@@ -3,10 +3,11 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use glance_check::CitationChecker;
 use glance_core::{RegenerationPlan, SourcePin, leaf_to_root_dirs, snapshot_tree};
 use glance_gen::{GenerationRequest, MockProvider, PageGenerator, PageKind};
+use glance_publish::{GhSisterHost, PublishRequest, SourceRepo};
 use serde::Deserialize;
 
 #[derive(Debug, Parser)]
@@ -49,6 +50,34 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
+    Publish {
+        #[arg(long)]
+        site_dir: PathBuf,
+        #[arg(long)]
+        source_owner: String,
+        #[arg(long)]
+        source_name: String,
+        #[arg(long)]
+        source_sha: String,
+        #[arg(long, value_enum)]
+        mode: PublishModeArg,
+        #[arg(long)]
+        sister_worktree: Option<PathBuf>,
+        #[arg(long)]
+        sister_remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        source_pr_title: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PublishModeArg {
+    Branch,
+    Master,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -79,7 +108,44 @@ fn main() -> Result<()> {
             port,
             once,
         } => serve_local_command(&config, site_root, port, once),
+        Command::Publish {
+            site_dir,
+            source_owner,
+            source_name,
+            source_sha,
+            mode,
+            sister_worktree,
+            sister_remote,
+            branch,
+            source_pr_title,
+            run_id,
+        } => publish_command(PublishCommand {
+            site_dir,
+            source_owner,
+            source_name,
+            source_sha,
+            mode,
+            sister_worktree,
+            sister_remote,
+            branch,
+            source_pr_title,
+            run_id,
+        }),
     }
+}
+
+#[derive(Debug)]
+struct PublishCommand {
+    site_dir: PathBuf,
+    source_owner: String,
+    source_name: String,
+    source_sha: String,
+    mode: PublishModeArg,
+    sister_worktree: Option<PathBuf>,
+    sister_remote: Option<String>,
+    branch: Option<String>,
+    source_pr_title: Option<String>,
+    run_id: Option<String>,
 }
 
 fn run_command(config: &GlanceConfig, root: Option<PathBuf>) -> Result<()> {
@@ -236,6 +302,59 @@ fn serve_local_command(
         }
     }
     Ok(())
+}
+
+fn publish_command(command: PublishCommand) -> Result<()> {
+    let source = SourceRepo {
+        owner: command.source_owner,
+        name: command.source_name,
+        sha: command.source_sha,
+    };
+    let worktree_dir = command.sister_worktree.unwrap_or_else(|| {
+        PathBuf::from("target")
+            .join("glance-publish")
+            .join(source.sister_name())
+    });
+    let mode = match command.mode {
+        PublishModeArg::Master => glance_publish::PublishMode::Master,
+        PublishModeArg::Branch => {
+            let branch = command
+                .branch
+                .unwrap_or_else(|| format!("glance/{}", short_sha(&source.sha)));
+            let pr_title = command
+                .source_pr_title
+                .context("--source-pr-title is required for --mode branch")?;
+            glance_publish::PublishMode::Branch { branch, pr_title }
+        }
+    };
+
+    let outcome = glance_publish::publish(
+        PublishRequest {
+            site_dir: command.site_dir,
+            source,
+            worktree_dir,
+            sister_remote: command.sister_remote,
+            mode,
+            run_id: command.run_id,
+        },
+        &GhSisterHost,
+    )?;
+
+    println!("changed={}", outcome.changed);
+    println!("sister_ref={}", outcome.pushed_ref);
+    println!("worktree={}", outcome.worktree_dir.display());
+    if let Some(commit_sha) = outcome.commit_sha {
+        println!("commit_sha={commit_sha}");
+    }
+    if let Some(pr_url) = outcome.pr_url {
+        println!("pr_url={pr_url}");
+    }
+
+    Ok(())
+}
+
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
 }
 
 fn handle_connection(mut stream: TcpStream, site_root: &Path) -> Result<()> {
