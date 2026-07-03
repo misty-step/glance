@@ -6,7 +6,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glance_check::CitationChecker;
 use glance_core::{RegenerationPlan, SourcePin, leaf_to_root_dirs, snapshot_tree};
-use glance_gen::{GenerationRequest, MockProvider, PageGenerator, PageKind};
+use glance_gen::{
+    GenerationConfig, GenerationRequest, MockProvider, PageGenerator, PageKind, PageSpend,
+    ProviderMode, RealPageGenerator, SpendReport, spend_report_lines,
+};
 use glance_publish::{GhSisterHost, PublishRequest, SourceRepo};
 use serde::Deserialize;
 
@@ -86,6 +89,8 @@ struct GlanceConfig {
     site_root: Option<PathBuf>,
     source_sha: Option<String>,
     changed_paths: Option<Vec<PathBuf>>,
+    #[serde(default)]
+    generation: GenerationConfig,
 }
 
 fn main() -> Result<()> {
@@ -154,7 +159,13 @@ fn run_command(config: &GlanceConfig, root: Option<PathBuf>) -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
     let source_sha = configured_or_git_sha(config, &root)?;
     let snapshot = snapshot_tree(&root, &source_sha)?;
-    let provider = MockProvider::default();
+    let generation = config.generation.clone();
+    let routing = generation.routing.clone();
+    let provider: Box<dyn PageGenerator> = match generation.provider_mode {
+        ProviderMode::Mock => Box::new(MockProvider::with_routing(routing.clone())),
+        ProviderMode::Real => Box::new(RealPageGenerator::from_env(generation)?),
+    };
+    let mut spend_report = SpendReport::default();
 
     println!("source_sha={source_sha}");
     println!("directories={}", snapshot.directories.len());
@@ -169,17 +180,39 @@ fn run_command(config: &GlanceConfig, root: Option<PathBuf>) -> Result<()> {
                 PageKind::Interior
             }
         };
+        let route = routing.model_for(kind);
         let page = provider.generate(GenerationRequest {
+            source_root: snapshot.source_root.clone(),
             directory: directory.clone(),
             source_sha: source_sha.clone(),
             kind,
         })?;
+        spend_report.record(PageSpend {
+            directory: directory.clone(),
+            provider: page.provider.clone(),
+            model: page.model.clone(),
+            input_tokens: page.input_tokens,
+            output_tokens: page.output_tokens,
+            spend_micros: page.spend_micros,
+        });
         println!(
-            "would_generate={} tier={:?} spend_micros={}",
+            "would_generate={} kind={:?} tier={:?} provider={} model={} max_tokens={} input_tokens={} output_tokens={} spend_micros={}",
             directory.display(),
+            kind,
             page.tier,
+            page.provider,
+            page.model,
+            route.max_tokens,
+            page.input_tokens,
+            page.output_tokens,
             page.spend_micros
         );
+        for note in page.metadata_notes {
+            println!("metadata_note={} {}", directory.display(), note);
+        }
+    }
+    for line in spend_report_lines(&spend_report) {
+        println!("{line}");
     }
     Ok(())
 }

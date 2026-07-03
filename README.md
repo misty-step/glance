@@ -8,13 +8,34 @@ This founding slice intentionally ships only the deterministic core:
 - `glance-core`: source tree walking, per-directory content hashes, regeneration
   plans, and source SHA pinning.
 - `glance-check`: deterministic citation checking for generated HTML.
-- `glance-gen`: model generation scaffolding, tier routing, and a mock provider.
 - `glance-publish`: sister-repo publishing for generated HTML and metadata.
-- `glance`: CLI entrypoint for `run`, `plan`, `check`, and `serve-local`.
+- `glance-gen`: tier-routed generation providers, fallback policy, budget
+  enforcement, spend reporting, and the mock provider used by deterministic
+  local smoke runs.
+- `glance`: CLI entrypoint for `run`, `plan`, `check`, `publish`, and
+  `serve-local`.
 
-Generation providers, page templates, webhook triggers, and deployed site
-serving are backlog work. The old Go tool at `phrazzld/glance` is reference
-material only.
+Page templates, webhook triggers, and deployed site serving are backlog work.
+The old Go tool at `phrazzld/glance` is reference material only.
+
+## Generation providers
+
+`glance.toml` configures leaf, interior, and root generation tiers with a model
+slug and max token cap. Defaults are:
+
+- leaf: `deepseek/deepseek-v4-flash`, 900 output tokens
+- interior: `anthropic/claude-sonnet-5`, 1800 output tokens
+- root: `openai/gpt-5.5`, 2600 output tokens
+
+Normal repo gates use `provider_mode = "mock"` so CI never depends on live
+secrets. Set `provider_mode = "real"` to use env-only provider credentials:
+`OPENROUTER_API_KEY` for OpenRouter chat completions and `GEMINI_API_KEY` for
+Gemini native `generateContent`. The composite fallback client owns all retry,
+exponential backoff, and jitter; inner provider clients make one HTTP attempt.
+
+Budgets are hard caps in cost micros. A run fails before a provider call if the
+estimated page would exceed `per_run_micros` or `per_day_micros`. Each run emits
+a spend report with input tokens, output tokens, and estimated cost per page.
 
 ## Gate
 
