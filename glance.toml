@@ -1,2 +1,42 @@
 source_root = "."
 site_root = "site"
+
+[generation]
+provider_mode = "mock"
+
+[generation.budget]
+per_run_micros = 500000
+per_day_micros = 2000000
+spent_today_micros = 0
+
+[generation.prompt]
+max_file_bytes = 65536
+
+[generation.retry]
+max_attempts = 3
+base_backoff_millis = 200
+jitter_millis = 75
+
+[generation.routing.leaf]
+tier = "cheap"
+provider = "open-router"
+model = "deepseek/deepseek-v4-flash"
+max_tokens = 900
+input_micros_per_million_tokens = 40
+output_micros_per_million_tokens = 180
+
+[generation.routing.interior]
+tier = "mid"
+provider = "open-router"
+model = "anthropic/claude-sonnet-5"
+max_tokens = 1800
+input_micros_per_million_tokens = 3000
+output_micros_per_million_tokens = 15000
+
+[generation.routing.root]
+tier = "frontier"
+provider = "open-router"
+model = "openai/gpt-5.5"
+max_tokens = 2600
+input_micros_per_million_tokens = 10000
+output_micros_per_million_tokens = 30000

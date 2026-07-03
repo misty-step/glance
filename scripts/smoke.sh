@@ -62,7 +62,8 @@ printf 'source_sha = "fixture-sha"\n' > "$tmpdir/glance.toml"
 cargo run -q -p glance -- --config "$tmpdir/glance.toml" run \
   --root crates/glance-core/tests/fixtures/mini-source \
   > "$tmpdir/run.out"
-grep -q 'would_generate=. tier=Frontier spend_micros=0' "$tmpdir/run.out"
+grep -q 'would_generate=. kind=Root tier=Frontier provider=mock model=openai/gpt-5.5 max_tokens=2600 input_tokens=0 output_tokens=0 spend_micros=0' "$tmpdir/run.out"
+grep -q 'spend_report pages=4 input_tokens=0 output_tokens=0 spend_micros=0' "$tmpdir/run.out"
 
 mkdir -p "$tmpdir/site"
 printf '<!doctype html><title>glance smoke</title><p>ok</p>' > "$tmpdir/site/index.html"
