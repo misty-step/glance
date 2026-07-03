@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>src — glance</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f1115;
+      --panel: #171a21;
+      --text: #e7eaf0;
+      --muted: #aab2c0;
+      --line: #2a3040;
+      --accent: #7cc4ff;
+      --warn: #ffcc66;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { padding: 32px 20px 56px; }
+    .page { max-width: 980px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 2rem; line-height: 1.1; }
+    .lede { color: var(--muted); margin: 0 0 28px; }
+    .glance-section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 18px 14px; margin: 0 0 16px; }
+    .glance-section-title { margin: 0 0 10px; font-size: 1.05rem; letter-spacing: .01em; }
+    .glance-cited { margin: 0 0 10px; }
+    .glance-cited:last-child { margin-bottom: 0; }
+    .glance-composition { display: block; }
+    .glance-child-link { display: inline-block; margin: 0 0 4px; color: var(--accent); text-decoration: none; }
+    .glance-child-link:hover { text-decoration: underline; }
+    .glance-child-role { margin: 0 0 14px; color: var(--muted); }
+    code { background: rgba(255,255,255,.06); padding: 0 .3em; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>src</h1>
+      <p class="lede">A small Rust surface where one top-level module hands work to one parser leaf and returns its numeric answer.</p>
+    </header>
+
+    <section class="glance-section" data-glance-section="what-this-is">
+      <h2 class="glance-section-title">What this is</h2>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">This directory is a tiny Rust library root that exposes a parser module and a single public function, <code>answer</code>, which returns a <code>u32</code> by calling that parser with the literal text <code>"42"</code>.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="role-in-the-whole">
+      <h2 class="glance-section-title">Role in the whole</h2>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">The root file is the binding point between the outer library API and the child parser directory: it publishes the module and delegates the actual conversion work to <code>parser::parse_answer</code>.</p>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">That delegation makes the directory cooperate as a simple pipeline, with the root fixed on orchestration and the child fixed on parsing the numeric text it receives.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="composition">
+      <h2 class="glance-section-title">Composition</h2>
+      <div class="glance-composition">
+        <a class="glance-child-link" href="../src/parser/">src/parser</a>
+        <p class="glance-child-role">The only child page; it holds the parser leaf that accepts text and turns the fixture input into a typed number.</p>
+      </div>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">The directory’s internal shape is one module declaration and one exported function, so the root stays thin and the child owns the conversion step.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="seams-contracts">
+      <h2 class="glance-section-title">Seams and contracts</h2>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">The main seam is the handoff from a hard-coded string in the root to the parser’s string input, and the contract on that handoff is that the text must be suitable for numeric parsing.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">The parser child makes that contract explicit by parsing the input directly and using <code>expect</code> with the message <code>fixture input is numeric</code>, so success is the only supported outcome on this path.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="where-it-can-hurt-you">
+      <h2 class="glance-section-title">Where it can hurt you</h2>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">The sharp edge sits in the child parser: invalid text does not return a recovery value, because <code>expect</code> turns parse failure into a panic.</p>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:3-5">That matters to the operator of the root API as well, because <code>answer</code> always sends the parser the fixed string <code>"42"</code>, so the whole path depends on that input staying within the numeric contract.</p>
+    </section>
+  </main>
+</body>
+</html>

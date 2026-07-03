@@ -1,5 +1,5 @@
 source_root = "."
-site_root = "site"
+site_root = "../glance-site"
 
 [generation]
 provider_mode = "mock"

@@ -1,6 +1,6 @@
 # 005 prompt/context engineering per harness-engineering practices
 
-Status: pending
+Status: implemented
 
 ## Goal
 

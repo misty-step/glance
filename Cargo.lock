@@ -375,6 +375,7 @@ dependencies = [
  "glance-gen",
  "glance-publish",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]
@@ -401,6 +402,8 @@ dependencies = [
 name = "glance-gen"
 version = "0.1.0"
 dependencies = [
+ "glance-core",
+ "scraper",
  "serde",
  "serde_json",
  "tempfile",

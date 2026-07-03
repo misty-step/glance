@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
@@ -7,11 +8,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use glance_check::CitationChecker;
 use glance_core::{RegenerationPlan, SourcePin, leaf_to_root_dirs, snapshot_tree};
 use glance_gen::{
-    GenerationConfig, GenerationRequest, MockProvider, PageGenerator, PageKind, PageSpend,
-    ProviderMode, RealPageGenerator, SpendReport, spend_report_lines,
+    GeneratedPage, GenerationConfig, GenerationRequest, MockProvider, PageGenerator, PageKind,
+    PageSpend, ProviderMode, RealPageGenerator, SpendReport, assemble_prompt_context,
+    spend_report_lines,
 };
 use glance_publish::{GhSisterHost, PublishRequest, SourceRepo};
 use serde::Deserialize;
+use serde_json::json;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -31,6 +34,8 @@ enum Command {
     Run {
         #[arg(long)]
         root: Option<PathBuf>,
+        #[arg(long)]
+        site_root: Option<PathBuf>,
     },
     Plan {
         #[arg(long)]
@@ -98,7 +103,7 @@ fn main() -> Result<()> {
     let config = load_config(&cli.config)?;
 
     match cli.command {
-        Command::Run { root } => run_command(&config, root),
+        Command::Run { root, site_root } => run_command(&config, root, site_root),
         Command::Plan {
             root,
             changed_paths,
@@ -153,19 +158,33 @@ struct PublishCommand {
     run_id: Option<String>,
 }
 
-fn run_command(config: &GlanceConfig, root: Option<PathBuf>) -> Result<()> {
+fn run_command(
+    config: &GlanceConfig,
+    root: Option<PathBuf>,
+    site_root: Option<PathBuf>,
+) -> Result<()> {
     let root = root
         .or_else(|| config.source_root.clone())
         .unwrap_or_else(|| PathBuf::from("."));
     let source_sha = configured_or_git_sha(config, &root)?;
     let snapshot = snapshot_tree(&root, &source_sha)?;
+    let site_root = site_root
+        .or_else(|| config.site_root.clone())
+        .map(|site_root| resolve_site_root_outside_source(&site_root, &snapshot.source_root))
+        .transpose()?;
     let generation = config.generation.clone();
     let routing = generation.routing.clone();
+    let prompt = generation.prompt.clone();
     let provider: Box<dyn PageGenerator> = match generation.provider_mode {
         ProviderMode::Mock => Box::new(MockProvider::with_routing(routing.clone())),
         ProviderMode::Real => Box::new(RealPageGenerator::from_env(generation)?),
     };
     let mut spend_report = SpendReport::default();
+    let existing_pages = match &site_root {
+        Some(site_root) if site_root.exists() => load_existing_generated_pages(site_root)?,
+        _ => BTreeMap::new(),
+    };
+    let mut generated_pages = BTreeMap::new();
 
     println!("source_sha={source_sha}");
     println!("directories={}", snapshot.directories.len());
@@ -181,12 +200,23 @@ fn run_command(config: &GlanceConfig, root: Option<PathBuf>) -> Result<()> {
             }
         };
         let route = routing.model_for(kind);
-        let page = provider.generate(GenerationRequest {
-            source_root: snapshot.source_root.clone(),
-            directory: directory.clone(),
-            source_sha: source_sha.clone(),
+        let prompt_context = assemble_prompt_context(
+            &snapshot,
+            &directory,
             kind,
-        })?;
+            prompt.max_file_bytes,
+            &generated_pages,
+            &existing_pages,
+        )?;
+        let page = provider.generate(
+            GenerationRequest::new(
+                snapshot.source_root.clone(),
+                directory.clone(),
+                source_sha.clone(),
+                kind,
+            )
+            .with_prompt_context(prompt_context),
+        )?;
         spend_report.record(PageSpend {
             directory: directory.clone(),
             provider: page.provider.clone(),
@@ -207,14 +237,154 @@ fn run_command(config: &GlanceConfig, root: Option<PathBuf>) -> Result<()> {
             page.output_tokens,
             page.spend_micros
         );
-        for note in page.metadata_notes {
+        for note in &page.metadata_notes {
             println!("metadata_note={} {}", directory.display(), note);
         }
+        if let Some(site_root) = &site_root {
+            write_generated_page(site_root, &directory, &source_sha, kind, &page)?;
+            println!(
+                "wrote_page={} {}",
+                directory.display(),
+                page_output_dir(site_root, &directory).display()
+            );
+        }
+        generated_pages.insert(directory.clone(), page.html.clone());
     }
     for line in spend_report_lines(&spend_report) {
         println!("{line}");
     }
     Ok(())
+}
+
+fn resolve_site_root_outside_source(site_root: &Path, source_root: &Path) -> Result<PathBuf> {
+    let source_root = source_root
+        .canonicalize()
+        .with_context(|| format!("canonicalize source root {}", source_root.display()))?;
+    let site_root = canonicalize_writable_path(site_root)?;
+    if site_root == source_root || site_root.starts_with(&source_root) {
+        bail!(
+            "site_root {} must be outside source_root {}; generated HTML is never written into the source repository",
+            site_root.display(),
+            source_root.display()
+        );
+    }
+    Ok(site_root)
+}
+
+fn canonicalize_writable_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return path
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", path.display()));
+    }
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("current directory")?
+            .join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut suffix = PathBuf::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .with_context(|| format!("find existing parent for {}", path.display()))?;
+        let mut next_suffix = PathBuf::from(name);
+        next_suffix.push(&suffix);
+        suffix = next_suffix;
+        existing = existing
+            .parent()
+            .with_context(|| format!("find existing parent for {}", path.display()))?;
+    }
+
+    let mut canonical = existing
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", existing.display()))?;
+    canonical.push(suffix);
+    Ok(canonical)
+}
+
+fn write_generated_page(
+    site_root: &Path,
+    directory: &Path,
+    source_sha: &str,
+    kind: PageKind,
+    page: &GeneratedPage,
+) -> Result<()> {
+    let output_dir = page_output_dir(site_root, directory);
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("create output dir {}", output_dir.display()))?;
+    std::fs::write(output_dir.join("index.html"), &page.html)
+        .with_context(|| format!("write {}", output_dir.join("index.html").display()))?;
+
+    let metadata = json!({
+        "source_sha": source_sha,
+        "directory": path_label(directory),
+        "kind": page_kind_label(kind),
+        "prompt_version": &page.prompt_version,
+        "provider": &page.provider,
+        "model": &page.model,
+        "tier": format!("{:?}", page.tier),
+        "input_tokens": page.input_tokens,
+        "output_tokens": page.output_tokens,
+        "spend_micros": page.spend_micros,
+        "metadata_notes": &page.metadata_notes,
+    });
+    let metadata = serde_json::to_string_pretty(&metadata).context("serialize metadata")? + "\n";
+    std::fs::write(output_dir.join("metadata.json"), metadata)
+        .with_context(|| format!("write {}", output_dir.join("metadata.json").display()))?;
+    Ok(())
+}
+
+fn load_existing_generated_pages(site_root: &Path) -> Result<BTreeMap<PathBuf, String>> {
+    let site_root = site_root
+        .canonicalize()
+        .with_context(|| format!("canonicalize site root {}", site_root.display()))?;
+    let mut pages = BTreeMap::new();
+    for html_file in find_html_files(&site_root)? {
+        if html_file.file_name().and_then(|name| name.to_str()) != Some("index.html") {
+            continue;
+        }
+        let parent = html_file.parent().context("index parent")?;
+        let relative_parent = parent
+            .strip_prefix(&site_root)
+            .with_context(|| format!("make {} relative", parent.display()))?;
+        let directory = if relative_parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            relative_parent.to_path_buf()
+        };
+        let html = std::fs::read_to_string(&html_file)
+            .with_context(|| format!("read existing page {}", html_file.display()))?;
+        pages.insert(directory, html);
+    }
+    Ok(pages)
+}
+
+fn page_output_dir(site_root: &Path, directory: &Path) -> PathBuf {
+    if directory == Path::new(".") {
+        site_root.to_path_buf()
+    } else {
+        site_root.join(directory)
+    }
+}
+
+fn page_kind_label(kind: PageKind) -> &'static str {
+    match kind {
+        PageKind::Leaf => "leaf",
+        PageKind::Interior => "interior",
+        PageKind::Root | PageKind::CrossCutting => "root",
+    }
+}
+
+fn path_label(path: &Path) -> String {
+    if path == Path::new(".") {
+        ".".to_owned()
+    } else {
+        path.display().to_string()
+    }
 }
 
 fn plan_command(
@@ -509,6 +679,21 @@ mod tests {
         assert_eq!(
             request_path_to_relative("/nested/index.html?x=1").expect("relative"),
             PathBuf::from("nested/index.html")
+        );
+    }
+
+    #[test]
+    fn run_site_root_must_be_outside_source_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("source");
+
+        assert!(resolve_site_root_outside_source(&source, &source).is_err());
+        assert!(resolve_site_root_outside_source(&source.join("site"), &source).is_err());
+        assert!(
+            resolve_site_root_outside_source(&temp.path().join("site"), &source)
+                .expect("sibling site")
+                .ends_with("site")
         );
     }
 

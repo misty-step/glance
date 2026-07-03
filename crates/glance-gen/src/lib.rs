@@ -1,5 +1,9 @@
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -7,9 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
-
-#[cfg(test)]
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelTier {
@@ -59,6 +60,7 @@ pub struct GenerationRequest {
     pub directory: PathBuf,
     pub source_sha: String,
     pub kind: PageKind,
+    pub prompt_context: Option<PromptContext>,
 }
 
 impl GenerationRequest {
@@ -73,13 +75,20 @@ impl GenerationRequest {
             directory,
             source_sha,
             kind,
+            prompt_context: None,
         }
+    }
+
+    pub fn with_prompt_context(mut self, prompt_context: PromptContext) -> Self {
+        self.prompt_context = Some(prompt_context);
+        self
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedPage {
     pub html: String,
+    pub prompt_version: String,
     pub tier: ModelTier,
     pub provider: String,
     pub model: String,
@@ -134,109 +143,9 @@ pub struct PageSpend {
     pub spend_micros: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromptContext {
-    pub prompt: String,
-    pub estimated_input_tokens: u64,
-    pub metadata_notes: Vec<String>,
-}
-
-impl PromptContext {
-    pub fn from_request(
-        request: &GenerationRequest,
-        max_file_bytes: usize,
-    ) -> Result<Self, GenerationError> {
-        Self::from_directory(&request.source_root, &request.directory, max_file_bytes)
-    }
-
-    pub fn from_directory(
-        source_root: &Path,
-        directory: &Path,
-        max_file_bytes: usize,
-    ) -> Result<Self, GenerationError> {
-        let absolute_dir = if directory.is_absolute() {
-            directory.to_path_buf()
-        } else {
-            source_root.join(directory)
-        };
-        let mut entries = std::fs::read_dir(&absolute_dir)
-            .map_err(|source| GenerationError::Io {
-                path: absolute_dir.clone(),
-                source,
-            })?
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|source| GenerationError::Io {
-                path: absolute_dir.clone(),
-                source,
-            })?;
-        entries.sort_by_key(|entry| entry.file_name());
-
-        let mut prompt = String::from(
-            "Generate a self-contained HTML glance page for this repository directory.\n\
-             Return raw HTML only. The first non-whitespace bytes must be <!doctype html> or <html. \
-             Do not wrap the page in Markdown fences or explanatory prose.\n\
-             Every factual claim must be cited as file:line. Do not speculate about CLI flags, \
-             deployment, recommendations, or behavior not supported by the supplied source.\n\n",
-        );
-        let mut metadata_notes = Vec::new();
-
-        for entry in entries {
-            let path = entry.path();
-            let file_type = entry.file_type().map_err(|source| GenerationError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            if !file_type.is_file() {
-                continue;
-            }
-
-            let relative = path
-                .strip_prefix(source_root)
-                .unwrap_or(&path)
-                .to_path_buf();
-            let bytes = std::fs::read(&path).map_err(|source| GenerationError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            let (body, truncated) = utf8_safe_prefix(&bytes, max_file_bytes);
-            if truncated {
-                metadata_notes.push(format!(
-                    "truncated {} to {max_file_bytes} bytes on a UTF-8 boundary",
-                    relative.display()
-                ));
-            }
-
-            prompt.push_str("--- file: ");
-            prompt.push_str(&relative.to_string_lossy());
-            prompt.push_str(" ---\n");
-            prompt.push_str(&body);
-            prompt.push_str("\n\n");
-        }
-
-        let estimated_input_tokens = estimate_tokens(&prompt);
-        Ok(Self {
-            prompt,
-            estimated_input_tokens,
-            metadata_notes,
-        })
-    }
-}
-
-fn utf8_safe_prefix(bytes: &[u8], max_bytes: usize) -> (String, bool) {
-    if bytes.len() <= max_bytes {
-        return (String::from_utf8_lossy(bytes).into_owned(), false);
-    }
-
-    let mut end = max_bytes;
-    while end > 0 && std::str::from_utf8(&bytes[..end]).is_err() {
-        end -= 1;
-    }
-    (String::from_utf8_lossy(&bytes[..end]).into_owned(), true)
-}
-
-fn estimate_tokens(text: &str) -> u64 {
-    text.chars().count().div_ceil(4) as u64
-}
+mod context;
+use context::validate_raw_html;
+pub use context::{PromptContext, assemble_prompt_context};
 
 #[derive(Debug, Error)]
 pub enum GenerationError {
@@ -254,6 +163,12 @@ pub enum GenerationError {
     },
     #[error("provider response was missing expected field: {0}")]
     InvalidProviderResponse(String),
+    #[error("context assembly failed: {message}")]
+    Context { message: String },
+    #[error("prompt template {path} is invalid: {message}")]
+    PromptTemplate { path: &'static str, message: String },
+    #[error("provider returned non-html output: {message}")]
+    InvalidHtml { message: String },
     #[error("http transport failed: {0}")]
     Http(String),
     #[error("io error at {path}: {source}")]
@@ -292,21 +207,42 @@ impl MockProvider {
 
 impl PageGenerator for MockProvider {
     fn generate(&self, request: GenerationRequest) -> Result<GeneratedPage, GenerationError> {
+        let prompt_context = PromptContext::from_request(&request, 64 * 1024)?;
         let tier = self.router.tier_for(request.kind);
         let route = self.routing.model_for(request.kind);
         let directory = request.directory.display();
+        let citation = prompt_context.primary_citation.as_deref();
+        let cited_attr = citation
+            .map(|citation| format!(r#" class="glance-cited" data-glance-cite="{citation}""#))
+            .unwrap_or_default();
+        let cross_cutting = if matches!(request.kind, PageKind::Root | PageKind::CrossCutting) {
+            format!(
+                r#"<section class="glance-section glance-cross-cutting" data-glance-section="flows"><h2 class="glance-section-title">Flows</h2><p{cited_attr}>Mock flow across generated context.</p></section>
+<section class="glance-section glance-cross-cutting" data-glance-section="data-model"><h2 class="glance-section-title">Data model</h2><p{cited_attr}>Mock data model distinguishes stored source from generated pages.</p></section>
+<section class="glance-section glance-cross-cutting" data-glance-section="failure-edge-index"><h2 class="glance-section-title">Failure-edge index</h2><p{cited_attr}>Mock failure index carries child sharp edges.</p></section>"#
+            )
+        } else {
+            String::new()
+        };
         Ok(GeneratedPage {
             html: format!(
-                "<!doctype html><html data-source-sha=\"{}\"><body><h1>{directory}</h1><p data-glance-cite=\"README.md:1\">Mock glance page.</p></body></html>",
-                request.source_sha
+                r#"<!doctype html><html data-source-sha="{}" data-prompt-version="{}"><head><meta charset="utf-8"><title>Glance {directory}</title></head><body class="glance-page"><header class="glance-header"><h1>{directory}</h1></header><main>
+<section class="glance-section" data-glance-section="what-this-is"><h2 class="glance-section-title">What this is</h2><p{cited_attr}>Mock glance page for {directory}.</p></section>
+<section class="glance-section" data-glance-section="role-in-the-whole"><h2 class="glance-section-title">Role in the whole</h2><p{cited_attr}>Mock role in the repository.</p></section>
+<section class="glance-section" data-glance-section="composition"><h2 class="glance-section-title">Composition</h2><div class="glance-composition"><p{cited_attr}>Mock composition section.</p></div></section>
+<section class="glance-section" data-glance-section="seams-contracts"><h2 class="glance-section-title">Seams and contracts</h2><p{cited_attr}>Mock seam section.</p></section>
+<section class="glance-section" data-glance-section="where-it-can-hurt-you"><h2 class="glance-section-title">Where it can hurt you</h2><p{cited_attr}>Nothing sharp found.</p></section>
+{cross_cutting}</main></body></html>"#,
+                request.source_sha, prompt_context.prompt_version
             ),
+            prompt_version: prompt_context.prompt_version,
             tier,
             provider: "mock".to_owned(),
             model: route.model.clone(),
             input_tokens: 0,
             output_tokens: 0,
             spend_micros: 0,
-            metadata_notes: Vec::new(),
+            metadata_notes: prompt_context.metadata_notes,
         })
     }
 }
@@ -630,6 +566,7 @@ impl PageGenerator for RealPageGenerator {
                 return Err(error);
             }
         };
+        validate_raw_html(&output.html)?;
 
         let spend_micros = output.spend_micros.unwrap_or_else(|| {
             route.estimate_cost_micros(output.input_tokens, output.output_tokens)
@@ -649,6 +586,7 @@ impl PageGenerator for RealPageGenerator {
 
         Ok(GeneratedPage {
             html: output.html,
+            prompt_version: prompt.prompt_version,
             tier: route.tier,
             provider: output.provider,
             model: output.model,
@@ -1152,9 +1090,12 @@ mod tests {
     #[test]
     fn prompt_context_truncates_on_utf8_boundary_and_records_note() {
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("README.md"), "abc😄def").expect("fixture");
+        std::fs::write(temp.path().join("README.md"), "fixture repo").expect("readme");
+        std::fs::create_dir(temp.path().join("leaf")).expect("leaf dir");
+        std::fs::write(temp.path().join("leaf/data.txt"), "abc😄def").expect("fixture");
 
-        let context = PromptContext::from_directory(temp.path(), temp.path(), 6).expect("context");
+        let context =
+            PromptContext::from_directory(temp.path(), Path::new("leaf"), 6).expect("context");
 
         assert!(context.prompt.contains("abc"));
         assert!(!context.prompt.contains("def"));
@@ -1162,7 +1103,7 @@ mod tests {
             context
                 .metadata_notes
                 .iter()
-                .any(|note| note.contains("truncated README.md"))
+                .any(|note| note.contains("truncated leaf/data.txt"))
         );
     }
 
@@ -1184,8 +1125,10 @@ mod tests {
         );
         let prompt = PromptContext {
             prompt: "source".to_owned(),
+            prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 2,
             metadata_notes: Vec::new(),
+            primary_citation: None,
         };
 
         let output = client
@@ -1225,8 +1168,10 @@ mod tests {
             OpenRouterClient::new("server-key".to_owned(), endpoint, Arc::new(UreqTransport));
         let prompt = PromptContext {
             prompt: "wire prompt".to_owned(),
+            prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 3,
             metadata_notes: Vec::new(),
+            primary_citation: None,
         };
 
         let output = client
@@ -1266,8 +1211,10 @@ mod tests {
         );
         let prompt = PromptContext {
             prompt: "source".to_owned(),
+            prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 2,
             metadata_notes: Vec::new(),
+            primary_citation: None,
         };
         let route = ModelRoute {
             provider: ProviderKind::Gemini,
@@ -1314,8 +1261,10 @@ mod tests {
         );
         let prompt = PromptContext {
             prompt: "gemini prompt".to_owned(),
+            prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 3,
             metadata_notes: Vec::new(),
+            primary_citation: None,
         };
         let route = ModelRoute {
             provider: ProviderKind::Gemini,
@@ -1362,8 +1311,10 @@ mod tests {
         );
         let prompt = PromptContext {
             prompt: "source".to_owned(),
+            prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 2,
             metadata_notes: Vec::new(),
+            primary_citation: None,
         };
 
         let output = client
@@ -1406,8 +1357,10 @@ mod tests {
         );
         let prompt = PromptContext {
             prompt: "source".to_owned(),
+            prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 2,
             metadata_notes: Vec::new(),
+            primary_citation: None,
         };
         let route = ModelRoute {
             provider: ProviderKind::Gemini,

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>docs</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      line-height: 1.5;
+      background: Canvas;
+      color: CanvasText;
+    }
+    main {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    .glance-section {
+      padding: 18px 0 22px;
+      border-bottom: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+    }
+    .glance-section:last-child { border-bottom: 0; }
+    .glance-section-title {
+      margin: 0 0 10px;
+      font-size: 1.15rem;
+      line-height: 1.25;
+    }
+    .glance-cited {
+      margin: 0.5rem 0;
+    }
+    .glance-composition {
+      margin: 0.5rem 0;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="glance-section" data-glance-section="what-this-is">
+      <h2 class="glance-section-title">What this is</h2>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">This directory is documented by a single guide file, and that guide states one clear rule: this directory should not be in a parser-only regeneration plan.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="role-in-the-whole">
+      <h2 class="glance-section-title">Role in the whole repository</h2>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">The directory serves the repository as a guarded documentation area: its content exists to communicate that it must be excluded from parser-only regeneration planning.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="composition">
+      <h2 class="glance-section-title">Composition</h2>
+      <p class="glance-cited glance-composition" data-glance-cite="docs/guide.md:1-3">This is a leaf directory, so there are no child directories to describe here; the visible local content is the guide that sets the directory’s one explicit rule.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="seams-contracts">
+      <h2 class="glance-section-title">Seams and contracts</h2>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">The load-bearing invariant is simple and sharp: parser-only regeneration must not include this directory.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="where-it-can-hurt-you">
+      <h2 class="glance-section-title">Where it can hurt you</h2>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">The hazard is accidental inclusion in a regeneration plan that only parses files, because the guide explicitly forbids that use of this directory.</p>
+    </section>
+  </main>
+</body>
+</html>

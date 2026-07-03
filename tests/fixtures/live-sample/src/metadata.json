@@ -1,0 +1,13 @@
+{
+  "directory": "src",
+  "input_tokens": 2416,
+  "kind": "interior",
+  "metadata_notes": [],
+  "model": "openai/gpt-5.4-mini-20260317",
+  "output_tokens": 1390,
+  "prompt_version": "glance-005-interior-v2",
+  "provider": "openrouter",
+  "source_sha": "9d063960fcabeea7cc76ceb60ab06fab691edd52",
+  "spend_micros": 0,
+  "tier": "Mid"
+}

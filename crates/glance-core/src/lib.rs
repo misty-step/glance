@@ -31,12 +31,16 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkOptions {
     ignored_dir_names: BTreeSet<String>,
+    ignored_relative_dirs: BTreeSet<PathBuf>,
 }
 
 impl Default for WalkOptions {
     fn default() -> Self {
         Self {
             ignored_dir_names: [".git", "target"].into_iter().map(str::to_owned).collect(),
+            ignored_relative_dirs: [PathBuf::from("tests/fixtures/live-sample")]
+                .into_iter()
+                .collect(),
         }
     }
 }
@@ -44,6 +48,10 @@ impl Default for WalkOptions {
 impl WalkOptions {
     pub fn ignores_dir_name(&self, name: &str) -> bool {
         self.ignored_dir_names.contains(name)
+    }
+
+    pub fn ignores_relative_dir(&self, path: &Path) -> bool {
+        self.ignored_relative_dirs.contains(&normalize_dot(path))
     }
 }
 
@@ -223,11 +231,13 @@ fn hash_directory(
         })?;
 
         if file_type.is_dir() {
-            if options.ignores_dir_name(os_str_to_name(&entry.file_name()).as_ref()) {
+            let relative = relative_path(root, &path)?;
+            if options.ignores_dir_name(os_str_to_name(&entry.file_name()).as_ref())
+                || options.ignores_relative_dir(&relative)
+            {
                 continue;
             }
             let child_hash = hash_directory(&path, root, options, records)?;
-            let relative = relative_path(root, &path)?;
             child_dirs.push(relative.clone());
             child_hashes.push((relative, child_hash));
         } else if file_type.is_file() || file_type.is_symlink() {
