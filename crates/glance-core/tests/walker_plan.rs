@@ -75,6 +75,26 @@ fn default_walk_options_exclude_git_and_target_directories() {
     let options = WalkOptions::default();
     assert!(options.ignores_dir_name(".git"));
     assert!(options.ignores_dir_name("target"));
+    assert!(options.ignores_relative_dir(Path::new("tests/fixtures/live-sample")));
+}
+
+#[test]
+fn snapshot_excludes_committed_live_sample_evidence() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let snapshot = snapshot_tree(repo_root, "fixture-sha").expect("snapshot");
+
+    assert!(
+        snapshot
+            .directories
+            .keys()
+            .all(|path| !path.starts_with("tests/fixtures/live-sample")),
+        "live-sample evidence must not be re-ingested as source context"
+    );
 }
 
 #[cfg(unix)]

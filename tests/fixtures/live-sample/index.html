@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Source — glance</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f1115;
+      --panel: #171a21;
+      --text: #e7eaf0;
+      --muted: #aab2c0;
+      --line: #2a3040;
+      --accent: #7cc4ff;
+      --warn: #ffcc66;
+      --soft: rgba(255,255,255,.05);
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.55 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    body { padding: 32px 20px 56px; }
+    .page { max-width: 1020px; margin: 0 auto; }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 2.2rem;
+      line-height: 1.1;
+    }
+    .lede {
+      margin: 0 0 28px;
+      color: var(--muted);
+      max-width: 78ch;
+    }
+    .glance-section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px 18px 14px;
+      margin: 0 0 16px;
+    }
+    .glance-section-title {
+      margin: 0 0 10px;
+      font-size: 1.05rem;
+      letter-spacing: .01em;
+    }
+    .glance-cited {
+      margin: 0 0 10px;
+    }
+    .glance-cited:last-child { margin-bottom: 0; }
+    .glance-composition { display: block; }
+    .glance-child {
+      padding: 10px 0 12px;
+      border-top: 1px solid var(--soft);
+    }
+    .glance-child:first-child { border-top: 0; padding-top: 0; }
+    .glance-child-link {
+      display: inline-block;
+      margin: 0 0 4px;
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .glance-child-link:hover { text-decoration: underline; }
+    .glance-child-role {
+      margin: 0;
+      color: var(--muted);
+    }
+    ul {
+      margin: 8px 0 0 22px;
+      padding: 0;
+    }
+    li { margin: 0 0 8px; }
+    code {
+      background: rgba(255,255,255,.06);
+      padding: 0 .3em;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>Mini Source</h1>
+      <p class="lede" data-glance-cite="README.md:1-3">This repository is a fixture for glance-core tests, built around a deliberately tiny Rust parsing path and one documentation area whose only explicit rule is that it must stay out of parser-only regeneration plans.</p>
+    </header>
+
+    <section class="glance-section" data-glance-section="what-this-is">
+      <h2 class="glance-section-title">What this is</h2>
+      <p class="glance-cited" data-glance-cite="README.md:1-3">At the top level, the repository identifies itself only as Mini Source and says its purpose is to act as a fixture repository for glance-core tests.</p>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">The executable core of that fixture is a tiny Rust library that exposes a parser module and one public function, <code>answer</code>, which returns a <code>u32</code> by calling the parser with the literal text <code>"42"</code>.</p>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">Alongside that code path is a documentation directory whose guide defines one hard rule: the directory should not be included in a parser-only regeneration plan.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="role-in-the-whole">
+      <h2 class="glance-section-title">Role in the whole</h2>
+      <p class="glance-cited" data-glance-cite="README.md:1-3">As a test fixture, the repository’s whole job is to provide glance-core with a small, stable source tree whose meaning can be recovered from very little code and one sharply stated documentation constraint.</p>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">The source side supplies a minimal end-to-end software path: a public library API delegates work to a child parser module and turns one fixed string into one typed numeric answer.</p>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">The documentation side supplies a contrasting kind of contract: not a parsing behavior, but a planning boundary, because the guide exists to state that parser-only regeneration must exclude that directory.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">The design choice most likely to surprise a newcomer is how strict the parser path is: the parser does not model failure as data, and instead treats numeric input as a requirement by calling <code>expect</code> during conversion.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="composition">
+      <h2 class="glance-section-title">Composition</h2>
+      <div class="glance-composition">
+        <div class="glance-child">
+          <a class="glance-child-link" href="./docs/">docs</a>
+          <p class="glance-child-role" data-glance-cite="docs/guide.md:1-3">A guarded documentation area whose guide exists to say this directory must not participate in parser-only regeneration planning.</p>
+        </div>
+        <div class="glance-child">
+          <a class="glance-child-link" href="./src/">src</a>
+          <p class="glance-child-role" data-glance-cite="src/lib.rs:1-5">The Rust library root that publishes the parser module and exposes the one public entry point, <code>answer</code>.</p>
+        </div>
+      </div>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">The repository’s working structure is therefore not broad inventory but one thin orchestrator at the source root and one child parser leaf that performs the actual string-to-number conversion.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">At the bottom of that code path, the parser leaf contains a single function, <code>parse_answer</code>, which accepts <code>&amp;str</code> and returns <code>u32</code> by parsing directly.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="seams-contracts">
+      <h2 class="glance-section-title">Seams and contracts</h2>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">The main code seam is the handoff from the library root to the parser child: the root passes a hard-coded string into the parser API, so the contract at that boundary is that the text must be suitable for numeric parsing.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">That contract is load-bearing because the parser enforces it by parsing the input directly and calling <code>expect</code> with the message <code>fixture input is numeric</code>, making successful conversion the only supported outcome on this path.</p>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">A separate repository-level contract lives outside the Rust path: parser-only regeneration must not include the <code>docs</code> directory.</p>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">Together, those two contracts define the fixture’s shape: numeric text is mandatory on the code path, and exclusion of <code>docs</code> is mandatory on the parser-only planning path.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="where-it-can-hurt-you">
+      <h2 class="glance-section-title">Where it can hurt you</h2>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">The sharpest runtime edge is in the parser leaf, where non-numeric text becomes a panic rather than a recoverable result because conversion is wrapped in <code>expect</code>.</p>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:3-5">That edge propagates upward to the public API because <code>answer</code> depends completely on the fixed literal <code>"42"</code> remaining within the parser’s numeric contract.</p>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">The planning edge is different but equally explicit: if a parser-only regeneration plan accidentally includes <code>docs</code>, it violates the one rule stated by that directory’s guide.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="flows">
+      <h2 class="glance-section-title">Flows</h2>
+      <ul>
+        <li class="glance-cited" data-glance-cite="src/lib.rs:1-5">Public answer flow, hop 1: the source root exposes the parser module and the public function <code>answer</code>, and that function starts the repository’s only top-level code path by supplying the literal text <code>"42"</code>.</li>
+        <li class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">Public answer flow, hop 2: the parser leaf receives text through <code>parse_answer</code>, parses it directly into <code>u32</code>, and treats numeric input as required by using <code>expect</code>.</li>
+        <li class="glance-cited" data-glance-cite="src/lib.rs:1-5">Module composition flow, hop 1: the library root binds the child parser into the visible API surface by declaring the module and delegating conversion work to it.</li>
+        <li class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">Module composition flow, hop 2: the child parser completes that delegated work by being the sole place where raw text is converted into the typed answer.</li>
+        <li class="glance-cited" data-glance-cite="docs/guide.md:1-3">Regeneration-boundary flow, hop 1: the documentation guide states that the <code>docs</code> directory should not be included in a parser-only regeneration plan.</li>
+        <li class="glance-cited" data-glance-cite="README.md:1-3">Regeneration-boundary flow, hop 2: in a repository whose stated purpose is to serve as a glance-core test fixture, that exclusion rule becomes part of the source material the generated site must preserve and communicate.</li>
+      </ul>
+    </section>
+
+    <section class="glance-section" data-glance-section="data-model">
+      <h2 class="glance-section-title">Data model</h2>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">Stored shapes in the code path are minimal: the library root contains the literal string <code>"42"</code>, publishes the parser module, and exposes a function signature that returns <code>u32</code>.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">Stored shapes in the parser leaf are equally small: one function accepts an <code>&amp;str</code> input and defines conversion into <code>u32</code> as its only output shape.</p>
+      <p class="glance-cited" data-glance-cite="docs/guide.md:1-3">Stored shapes in the documentation path reduce to one explicit rule in the guide: <code>docs</code> must be excluded from parser-only regeneration plans.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">The primary derived shape is the typed numeric answer, produced when parser input text is successfully parsed into <code>u32</code>.</p>
+      <p class="glance-cited" data-glance-cite="src/lib.rs:1-5">At the repository surface, the exported derived value is whatever <code>answer</code> gets back from the parser after handing off the fixed fixture string.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="failure-edge-index">
+      <h2 class="glance-section-title">Failure-edge index</h2>
+      <ul>
+        <li class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">Non-numeric parser input is a hard failure edge: the parser uses <code>expect</code>, so invalid text causes a panic instead of producing a recoverable value.</li>
+        <li class="glance-cited" data-glance-cite="src/lib.rs:3-5">The public <code>answer</code> path inherits that parser edge because it always routes through the same conversion function with the fixed text <code>"42"</code>.</li>
+        <li class="glance-cited" data-glance-cite="docs/guide.md:1-3">Parser-only regeneration has a separate planning failure edge: including <code>docs</code> violates the directory rule stated in the guide.</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

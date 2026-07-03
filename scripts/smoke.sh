@@ -58,12 +58,39 @@ cargo run -q -p glance -- publish \
   > "$tmpdir/publish-2.out"
 grep -q 'changed=false' "$tmpdir/publish-2.out"
 
-printf 'source_sha = "fixture-sha"\n' > "$tmpdir/glance.toml"
+cp -R crates/glance-core/tests/fixtures/mini-source/. "$tmpdir/mini-source"
+git -C "$tmpdir/mini-source" -c core.hooksPath=/dev/null init -b main >/dev/null
+git -C "$tmpdir/mini-source" -c core.hooksPath=/dev/null add .
+git -C "$tmpdir/mini-source" \
+  -c core.hooksPath=/dev/null \
+  -c user.name=glance-smoke \
+  -c user.email=glance-smoke@example.invalid \
+  commit --no-verify -m mini-source >/dev/null
+mini_sha="$(git -C "$tmpdir/mini-source" -c core.hooksPath=/dev/null rev-parse HEAD)"
+printf 'source_sha = "%s"\n' "$mini_sha" > "$tmpdir/glance.toml"
 cargo run -q -p glance -- --config "$tmpdir/glance.toml" run \
-  --root crates/glance-core/tests/fixtures/mini-source \
+  --root "$tmpdir/mini-source" \
+  --site-root "$tmpdir/generated-site" \
   > "$tmpdir/run.out"
 grep -q 'would_generate=. kind=Root tier=Frontier provider=mock model=openai/gpt-5.5 max_tokens=2600 input_tokens=0 output_tokens=0 spend_micros=0' "$tmpdir/run.out"
 grep -q 'spend_report pages=4 input_tokens=0 output_tokens=0 spend_micros=0' "$tmpdir/run.out"
+test -f "$tmpdir/generated-site/index.html"
+test -f "$tmpdir/generated-site/metadata.json"
+test -f "$tmpdir/generated-site/docs/index.html"
+test -f "$tmpdir/generated-site/src/index.html"
+test -f "$tmpdir/generated-site/src/parser/index.html"
+grep -q '"prompt_version": "glance-005-root-v2"' "$tmpdir/generated-site/metadata.json"
+grep -q 'data-glance-section="what-this-is"' "$tmpdir/generated-site/index.html"
+grep -q 'data-glance-section="failure-edge-index"' "$tmpdir/generated-site/index.html"
+cargo run -q -p glance -- check \
+  --source-root "$tmpdir/mini-source" \
+  --source-sha "$mini_sha" \
+  "$tmpdir/generated-site/index.html" \
+  "$tmpdir/generated-site/docs/index.html" \
+  "$tmpdir/generated-site/src/index.html" \
+  "$tmpdir/generated-site/src/parser/index.html" \
+  > "$tmpdir/generated-check.out"
+grep -q 'checked ' "$tmpdir/generated-check.out"
 
 mkdir -p "$tmpdir/site"
 printf '<!doctype html><title>glance smoke</title><p>ok</p>' > "$tmpdir/site/index.html"

@@ -175,7 +175,12 @@ impl CitationChecker {
     }
 
     fn read_file_at_sha(&self, path: &Path) -> std::result::Result<String, String> {
-        let spec = format!("{}:{}", self.source_sha, path_to_git_spec(path));
+        let spec = format!(
+            "{}:{}{}",
+            self.source_sha,
+            self.git_prefix()?,
+            path_to_git_spec(path)
+        );
         let output = Command::new("git")
             .args(["show", &spec])
             .current_dir(&self.source_root)
@@ -191,6 +196,23 @@ impl CitationChecker {
         }
 
         String::from_utf8(output.stdout).map_err(|error| error.to_string())
+    }
+
+    fn git_prefix(&self) -> std::result::Result<String, String> {
+        let output = Command::new("git")
+            .args(["rev-parse", "--show-prefix"])
+            .current_dir(&self.source_root)
+            .output()
+            .map_err(|error| format!("git rev-parse failed: {error}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "git rev-parse failed in {}",
+                self.source_root.display()
+            ));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 }
 

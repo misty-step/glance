@@ -30,6 +30,47 @@ fn accepts_pages_whose_citations_exist_at_pinned_sha() {
 }
 
 #[test]
+fn accepts_subdirectory_source_roots_against_repo_sha() {
+    let repo = tempfile::tempdir().expect("repo");
+    let source = repo.path().join("fixtures/source");
+    std::fs::create_dir_all(&source).expect("source dir");
+    copy_dir(&fixture_dir().join("source"), &source).expect("copy source");
+
+    run(repo.path(), ["init", "-b", "main"]);
+    run(repo.path(), ["add", "."]);
+    run(
+        repo.path(),
+        [
+            "-c",
+            "user.name=glance-test",
+            "-c",
+            "user.email=glance-test@example.invalid",
+            "commit",
+            "--no-verify",
+            "-m",
+            "fixture",
+        ],
+    );
+    let output = Command::new("git")
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git rev-parse");
+    assert!(output.status.success());
+    let sha = String::from_utf8(output.stdout)
+        .expect("utf8")
+        .trim()
+        .to_owned();
+    let html = std::fs::read_to_string(fixture_dir().join("generated/good.html")).expect("html");
+
+    let report = CitationChecker::new(&source, sha).check_html(&html);
+
+    assert!(report.is_ok(), "{report:#?}");
+    assert_eq!(report.citations_checked, 2);
+}
+
+#[test]
 fn rejects_missing_files_and_missing_line_ranges() {
     let (repo, sha) = committed_source_repo();
     let html = std::fs::read_to_string(fixture_dir().join("generated/broken.html")).expect("html");

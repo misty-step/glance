@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>src/parser — glance</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f1115;
+      --panel: #171a21;
+      --text: #e7eaf0;
+      --muted: #aab2c0;
+      --line: #2a3040;
+      --accent: #7cc4ff;
+      --warn: #ffcc66;
+      --good: #8fe3a6;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { padding: 32px 20px 56px; }
+    .page { max-width: 920px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 2rem; line-height: 1.1; }
+    .lede { color: var(--muted); margin: 0 0 28px; }
+    .glance-section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 18px 14px; margin: 0 0 16px; }
+    .glance-section-title { margin: 0 0 10px; font-size: 1.05rem; letter-spacing: .01em; }
+    .glance-cited { margin: 0 0 10px; }
+    .glance-cited:last-child { margin-bottom: 0; }
+    .glance-composition { display: block; }
+    code { background: rgba(255,255,255,.06); padding: 0 .3em; border-radius: 6px; }
+    a { color: var(--accent); }
+    .note { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>src/parser</h1>
+      <p class="lede">A tiny parser leaf used by the fixture repository to expose one concrete parsing path.</p>
+    </header>
+
+    <section class="glance-section" data-glance-section="what-this-is">
+      <h2 class="glance-section-title">What this is</h2>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">This directory contains a single Rust function, <code>parse_answer</code>, that takes <code>&amp;str</code> input and returns a <code>u32</code> by parsing the input directly and expecting the fixture input to be numeric.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="role-in-the-whole">
+      <h2 class="glance-section-title">Role in the whole</h2>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">In a repository described as a fixture for glance-core tests, this leaf gives the test suite a minimal parsing surface to inspect: one exported function, one numeric conversion, and one fixed success assumption.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">That makes the directory useful as a small, stable example of how a parser module can turn raw text into a typed answer.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="composition">
+      <h2 class="glance-section-title">Composition</h2>
+      <div class="glance-composition">
+        <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">This is a leaf directory with no child directories.</p>
+        <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">Its visible composition is a single module file defining one function, so the directory stays intentionally small and easy to reason about from the outside.</p>
+      </div>
+    </section>
+
+    <section class="glance-section" data-glance-section="seams-contracts">
+      <h2 class="glance-section-title">Seams and contracts</h2>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">The load-bearing contract is the expectation that the input is numeric; the function does not recover from parse failure and instead uses <code>expect</code> with the message <code>fixture input is numeric</code>.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">The seam is therefore narrow: callers hand in text, and the only supported outcome here is successful conversion into <code>u32</code>.</p>
+    </section>
+
+    <section class="glance-section" data-glance-section="where-it-can-hurt-you">
+      <h2 class="glance-section-title">Where it can hurt you</h2>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">The sharp edge is explicit failure on non-numeric input, because <code>expect</code> turns invalid text into a panic rather than a recoverable result.</p>
+      <p class="glance-cited" data-glance-cite="src/parser/mod.rs:1-3">That edge is acceptable in a fixture, but it means this code should only be exercised with inputs that satisfy the numeric contract baked into the function.</p>
+    </section>
+  </main>
+</body>
+</html>
