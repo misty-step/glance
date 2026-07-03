@@ -12,6 +12,7 @@ clap.workspace = true
 glance-check = { path = "../glance-check" }
 glance-core = { path = "../glance-core" }
 glance-gen = { path = "../glance-gen" }
+glance-publish = { path = "../glance-publish" }
 serde.workspace = true
 toml.workspace = true
 
