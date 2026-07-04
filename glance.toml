@@ -5,8 +5,8 @@ site_root = "../glance-site"
 provider_mode = "mock"
 
 [generation.budget]
-per_run_micros = 500000
-per_day_micros = 2000000
+per_run_micros = 5000000
+per_day_micros = 20000000
 spent_today_micros = 0
 
 [generation.prompt]
@@ -21,22 +21,22 @@ jitter_millis = 75
 tier = "cheap"
 provider = "open-router"
 model = "deepseek/deepseek-v4-flash"
-max_tokens = 900
-input_micros_per_million_tokens = 40
-output_micros_per_million_tokens = 180
+max_tokens = 6000
+input_micros_per_million_tokens = 140000
+output_micros_per_million_tokens = 280000
 
 [generation.routing.interior]
 tier = "mid"
 provider = "open-router"
 model = "anthropic/claude-sonnet-5"
-max_tokens = 1800
-input_micros_per_million_tokens = 3000
-output_micros_per_million_tokens = 15000
+max_tokens = 10000
+input_micros_per_million_tokens = 2000000
+output_micros_per_million_tokens = 10000000
 
 [generation.routing.root]
 tier = "frontier"
 provider = "open-router"
 model = "openai/gpt-5.5"
-max_tokens = 2600
-input_micros_per_million_tokens = 10000
-output_micros_per_million_tokens = 30000
+max_tokens = 16000
+input_micros_per_million_tokens = 5000000
+output_micros_per_million_tokens = 30000000

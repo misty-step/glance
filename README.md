@@ -23,9 +23,9 @@ The old Go tool at `phrazzld/glance` is reference material only.
 `glance.toml` configures leaf, interior, and root generation tiers with a model
 slug and max token cap. Defaults are:
 
-- leaf: `deepseek/deepseek-v4-flash`, 900 output tokens
-- interior: `anthropic/claude-sonnet-5`, 1800 output tokens
-- root: `openai/gpt-5.5`, 2600 output tokens
+- leaf: `deepseek/deepseek-v4-flash`, 6000 output tokens
+- interior: `anthropic/claude-sonnet-5`, 10000 output tokens
+- root: `openai/gpt-5.5`, 16000 output tokens
 
 Normal repo gates use `provider_mode = "mock"` so CI never depends on live
 secrets. Set `provider_mode = "real"` to use env-only provider credentials:

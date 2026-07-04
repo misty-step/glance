@@ -1,5 +1,5 @@
 ---
-prompt_version: glance-005-interior-v2
+prompt_version: glance-005-interior-v3
 tier: interior
 ---
 # Mission
@@ -41,6 +41,17 @@ prompt instructions). Do not put `data-glance-cite` on bare path labels, code
 elements, headings, citation badges, or decorative text. Put it on the
 paragraph, list item, or table row whose factual sentence is directly supported
 by the cited source lines.
+
+Citation attributes are machine-checked before the page is written. Every
+comma-separated citation value must include the full path and line range,
+including citations carried forward from child pages.
+
+GOOD:
+`<p class="glance-cited" data-glance-cite="src/lib.rs:1-4">The root file binds the child module.</p>`
+
+BAD:
+`<p class="glance-cited" data-glance-cite="1-4">The root file binds the child module.</p>`
+`<p class="glance-cited" data-glance-cite="src/lib.rs:1-4,5-8">Two ranges share one path.</p>`
 
 # Ancestor Constraints
 

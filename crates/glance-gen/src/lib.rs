@@ -144,8 +144,8 @@ pub struct PageSpend {
 }
 
 mod context;
-use context::validate_raw_html;
 pub use context::{PromptContext, assemble_prompt_context};
+use context::{is_retryable_output_validation, validate_provider_output};
 
 #[derive(Debug, Error)]
 pub enum GenerationError {
@@ -291,25 +291,25 @@ impl Default for DepthRouting {
                 tier: ModelTier::Cheap,
                 provider: ProviderKind::OpenRouter,
                 model: "deepseek/deepseek-v4-flash".to_owned(),
-                max_tokens: 900,
-                input_micros_per_million_tokens: 40,
-                output_micros_per_million_tokens: 180,
+                max_tokens: 6_000,
+                input_micros_per_million_tokens: 140_000,
+                output_micros_per_million_tokens: 280_000,
             },
             interior: ModelRoute {
                 tier: ModelTier::Mid,
                 provider: ProviderKind::OpenRouter,
                 model: "anthropic/claude-sonnet-5".to_owned(),
-                max_tokens: 1800,
-                input_micros_per_million_tokens: 3_000,
-                output_micros_per_million_tokens: 15_000,
+                max_tokens: 10_000,
+                input_micros_per_million_tokens: 2_000_000,
+                output_micros_per_million_tokens: 10_000_000,
             },
             root: ModelRoute {
                 tier: ModelTier::Frontier,
                 provider: ProviderKind::OpenRouter,
                 model: "openai/gpt-5.5".to_owned(),
-                max_tokens: 2600,
-                input_micros_per_million_tokens: 10_000,
-                output_micros_per_million_tokens: 30_000,
+                max_tokens: 16_000,
+                input_micros_per_million_tokens: 5_000_000,
+                output_micros_per_million_tokens: 30_000_000,
             },
         }
     }
@@ -494,6 +494,7 @@ pub struct ProviderOutput {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub spend_micros: Option<u64>,
+    pub finish_reason: Option<String>,
 }
 
 pub trait ProviderClient: Send + Sync {
@@ -561,12 +562,32 @@ impl PageGenerator for RealPageGenerator {
         let output = match self.client.generate_once(&prompt, route) {
             Ok(output) => output,
             Err(error) => {
-                let mut budget = self.budget.lock().expect("budget mutex");
-                budget.reserved_micros = budget.reserved_micros.saturating_sub(estimated_micros);
+                self.release_reservation(estimated_micros);
                 return Err(error);
             }
         };
-        validate_raw_html(&output.html)?;
+        let output = match validate_provider_output(&output) {
+            Ok(()) => output,
+            Err(error) if is_retryable_output_validation(&error) => {
+                let prompt = prompt.with_retry_feedback(&error.to_string());
+                let retry_output = match self.client.generate_once(&prompt, route) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        self.release_reservation(estimated_micros);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = validate_provider_output(&retry_output) {
+                    self.release_reservation(estimated_micros);
+                    return Err(error);
+                }
+                retry_output
+            }
+            Err(error) => {
+                self.release_reservation(estimated_micros);
+                return Err(error);
+            }
+        };
 
         let spend_micros = output.spend_micros.unwrap_or_else(|| {
             route.estimate_cost_micros(output.input_tokens, output.output_tokens)
@@ -595,6 +616,13 @@ impl PageGenerator for RealPageGenerator {
             spend_micros,
             metadata_notes: prompt.metadata_notes,
         })
+    }
+}
+
+impl RealPageGenerator {
+    fn release_reservation(&self, estimated_micros: u64) {
+        let mut budget = self.budget.lock().expect("budget mutex");
+        budget.reserved_micros = budget.reserved_micros.saturating_sub(estimated_micros);
     }
 }
 
@@ -828,7 +856,13 @@ impl ProviderClient for OpenRouterClient {
         let output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
         let spend_micros = usage["cost"]
             .as_f64()
-            .map(|cost| (cost * 1_000_000.0).ceil() as u64);
+            .map(|cost| (cost * 1_000_000.0).ceil() as u64)
+            .filter(|spend_micros| {
+                *spend_micros > 0 || input_tokens.saturating_add(output_tokens) == 0
+            });
+        let finish_reason = value["choices"][0]["finish_reason"]
+            .as_str()
+            .map(str::to_owned);
 
         Ok(ProviderOutput {
             html,
@@ -837,6 +871,7 @@ impl ProviderClient for OpenRouterClient {
             input_tokens,
             output_tokens,
             spend_micros,
+            finish_reason,
         })
     }
 }
@@ -932,6 +967,9 @@ impl ProviderClient for GeminiClient {
             .as_u64()
             .unwrap_or(prompt.estimated_input_tokens);
         let output_tokens = usage["candidatesTokenCount"].as_u64().unwrap_or(0);
+        let finish_reason = value["candidates"][0]["finishReason"]
+            .as_str()
+            .map(str::to_owned);
 
         Ok(ProviderOutput {
             html,
@@ -940,6 +978,7 @@ impl ProviderClient for GeminiClient {
             input_tokens,
             output_tokens,
             spend_micros: None,
+            finish_reason,
         })
     }
 }
@@ -976,6 +1015,12 @@ pub fn spend_report_lines(report: &SpendReport) -> Vec<String> {
         "spend_report pages={} input_tokens={} output_tokens={} spend_micros={}",
         report.total_pages, report.input_tokens, report.output_tokens, report.spend_micros
     ));
+    if report.spend_micros == 0 && report.input_tokens.saturating_add(report.output_tokens) > 0 {
+        lines.push(format!(
+            "warning=zero_spend_with_tokens input_tokens={} output_tokens={}",
+            report.input_tokens, report.output_tokens
+        ));
+    }
     for page in &report.pages {
         lines.push(format!(
             "spend_page={} provider={} model={} input_tokens={} output_tokens={} spend_micros={}",
@@ -986,6 +1031,14 @@ pub fn spend_report_lines(report: &SpendReport) -> Vec<String> {
             page.output_tokens,
             page.spend_micros
         ));
+        if page.spend_micros == 0 && page.input_tokens.saturating_add(page.output_tokens) > 0 {
+            lines.push(format!(
+                "warning_page={} warning=zero_spend_with_tokens input_tokens={} output_tokens={}",
+                page.directory.display(),
+                page.input_tokens,
+                page.output_tokens
+            ));
+        }
     }
     lines
 }
@@ -1066,11 +1119,14 @@ mod tests {
             routing.model_for(PageKind::Leaf).model,
             "deepseek/deepseek-v4-flash"
         );
+        assert_eq!(routing.model_for(PageKind::Leaf).max_tokens, 6_000);
         assert_eq!(
             routing.model_for(PageKind::Interior).model,
             "anthropic/claude-sonnet-5"
         );
+        assert_eq!(routing.model_for(PageKind::Interior).max_tokens, 10_000);
         assert_eq!(routing.model_for(PageKind::Root).model, "openai/gpt-5.5");
+        assert_eq!(routing.model_for(PageKind::Root).max_tokens, 16_000);
     }
 
     #[test]
@@ -1098,7 +1154,7 @@ mod tests {
             PromptContext::from_directory(temp.path(), Path::new("leaf"), 6).expect("context");
 
         assert!(context.prompt.contains("abc"));
-        assert!(!context.prompt.contains("def"));
+        assert!(!context.prompt.contains("abc😄def"));
         assert!(
             context
                 .metadata_notes
@@ -1149,7 +1205,7 @@ mod tests {
         assert_eq!(request.url, "http://127.0.0.1/chat");
         assert_eq!(request.headers["Authorization"], "Bearer secret-key");
         assert_eq!(request.body["model"], "deepseek/deepseek-v4-flash");
-        assert_eq!(request.body["max_completion_tokens"], 900);
+        assert_eq!(request.body["max_completion_tokens"], 6_000);
         assert_eq!(request.body["stream"], false);
     }
 
@@ -1188,7 +1244,7 @@ mod tests {
         let request_lower = request.to_ascii_lowercase();
         assert!(request.contains("POST / HTTP/1.1"));
         assert!(request_lower.contains("authorization: bearer server-key"));
-        assert!(request.contains("\"max_completion_tokens\":900"));
+        assert!(request.contains("\"max_completion_tokens\":6000"));
         assert!(request.contains("\"model\":\"deepseek/deepseek-v4-flash\""));
     }
 
@@ -1237,7 +1293,7 @@ mod tests {
             "http://127.0.0.1/v1beta/models/gemini-3.5-flash:generateContent"
         );
         assert_eq!(request.headers["x-goog-api-key"], "gemini-key");
-        assert_eq!(request.body["generationConfig"]["maxOutputTokens"], 900);
+        assert_eq!(request.body["generationConfig"]["maxOutputTokens"], 6_000);
         assert_eq!(request.body["contents"][0]["parts"][0]["text"], "source");
     }
 
@@ -1281,7 +1337,7 @@ mod tests {
         let request_lower = request.to_ascii_lowercase();
         assert!(request.contains("POST /v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1"));
         assert!(request_lower.contains("x-goog-api-key: native-key"));
-        assert!(request.contains("\"maxOutputTokens\":900"));
+        assert!(request.contains("\"maxOutputTokens\":6000"));
         assert!(request.contains("\"text\":\"gemini prompt\""));
     }
 
@@ -1416,6 +1472,111 @@ mod tests {
     }
 
     #[test]
+    fn real_generator_rejects_provider_length_truncation() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(
+                "<!doctype html><html><body><p>cut",
+                Some("length"),
+                Some(1),
+            ))]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+        let request = request_with_prompt(PageKind::Root);
+
+        let error = generator
+            .generate(request)
+            .expect_err("length truncation must fail");
+
+        assert!(matches!(error, GenerationError::InvalidHtml { .. }));
+        assert!(error.to_string().contains("finish_reason=length"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(generator.spend_report().total_pages, 0);
+    }
+
+    #[test]
+    fn real_generator_rejects_missing_html_close_as_truncation() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(
+                "<!doctype html><html><body><p>cut",
+                Some("stop"),
+                Some(1),
+            ))]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let error = generator
+            .generate(request_with_prompt(PageKind::Leaf))
+            .expect_err("missing closing html must fail");
+
+        assert!(matches!(error, GenerationError::InvalidHtml { .. }));
+        assert!(error.to_string().contains("missing closing </html>"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(generator.spend_report().total_pages, 0);
+    }
+
+    #[test]
+    fn real_generator_retries_bad_citation_once_then_fails_loudly() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bad_html =
+            r#"<!doctype html><html><body><p data-glance-cite="21-26">bad cite</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: prompts.clone(),
+            outputs: std::sync::Mutex::new(vec![
+                Ok(provider_output(bad_html, Some("stop"), Some(1))),
+                Ok(provider_output(bad_html, Some("stop"), Some(1))),
+            ]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let error = generator
+            .generate(request_with_prompt(PageKind::Leaf))
+            .expect_err("bad citation must fail after retry");
+
+        assert!(matches!(error, GenerationError::InvalidHtml { .. }));
+        assert!(error.to_string().contains("data-glance-cite"));
+        assert!(error.to_string().contains("path:start[-end]"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let prompts = prompts.lock().expect("prompts");
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("Previous output was rejected"));
+        assert!(prompts[1].contains("data-glance-cite"));
+        assert_eq!(generator.spend_report().total_pages, 0);
+    }
+
+    #[test]
+    fn spend_report_warns_when_tokens_have_zero_spend() {
+        let mut report = SpendReport::default();
+        report.record(PageSpend {
+            directory: PathBuf::from("."),
+            provider: "openrouter".to_owned(),
+            model: "openai/gpt-5.5".to_owned(),
+            input_tokens: 50_000,
+            output_tokens: 0,
+            spend_micros: 0,
+        });
+
+        let lines = spend_report_lines(&report);
+
+        assert!(lines.iter().any(|line| {
+            line.contains("warning=zero_spend_with_tokens input_tokens=50000 output_tokens=0")
+        }));
+        assert!(lines.iter().any(|line| {
+            line.contains("warning_page=.") && line.contains("zero_spend_with_tokens")
+        }));
+    }
+
+    #[test]
     fn live_smoke_generates_one_leaf_page_when_enabled() {
         if std::env::var("GLANCE_LIVE_SMOKE").ok().as_deref() != Some("1") {
             eprintln!("skipping live smoke; set GLANCE_LIVE_SMOKE=1");
@@ -1502,6 +1663,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 spend_micros: Some(1),
+                finish_reason: Some("stop".to_owned()),
             })
         }
     }
@@ -1532,7 +1694,90 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 spend_micros: Some(1),
+                finish_reason: Some("stop".to_owned()),
             })
+        }
+    }
+
+    struct ScriptedClient {
+        name: &'static str,
+        attempts: Arc<AtomicUsize>,
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        outputs: std::sync::Mutex<Vec<Result<ProviderOutput, GenerationError>>>,
+    }
+
+    impl ProviderClient for ScriptedClient {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::OpenRouter
+        }
+
+        fn generate_once(
+            &self,
+            prompt: &PromptContext,
+            _route: &ModelRoute,
+        ) -> Result<ProviderOutput, GenerationError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.prompts
+                .lock()
+                .expect("prompts")
+                .push(prompt.prompt.clone());
+            self.outputs
+                .lock()
+                .expect("outputs")
+                .pop()
+                .expect("scripted output")
+        }
+    }
+
+    fn generation_config_for_validation() -> GenerationConfig {
+        GenerationConfig {
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_backoff_millis: 0,
+                jitter_millis: 0,
+            },
+            budget: BudgetConfig {
+                per_run_micros: Some(1_000_000),
+                per_day_micros: Some(1_000_000),
+                spent_today_micros: 0,
+            },
+            ..GenerationConfig::default()
+        }
+    }
+
+    fn request_with_prompt(kind: PageKind) -> GenerationRequest {
+        GenerationRequest::new(
+            PathBuf::from("."),
+            PathBuf::from("."),
+            "sha".to_owned(),
+            kind,
+        )
+        .with_prompt_context(PromptContext {
+            prompt: "source prompt".to_owned(),
+            prompt_version: "test-prompt".to_owned(),
+            estimated_input_tokens: 1,
+            metadata_notes: Vec::new(),
+            primary_citation: None,
+        })
+    }
+
+    fn provider_output(
+        html: &str,
+        finish_reason: Option<&str>,
+        spend_micros: Option<u64>,
+    ) -> ProviderOutput {
+        ProviderOutput {
+            html: html.to_owned(),
+            provider: "scripted".to_owned(),
+            model: "test-model".to_owned(),
+            input_tokens: 1,
+            output_tokens: 1,
+            spend_micros,
+            finish_reason: finish_reason.map(str::to_owned),
         }
     }
 

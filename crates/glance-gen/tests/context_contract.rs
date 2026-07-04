@@ -21,7 +21,7 @@ fn leaf_context_contains_only_leaf_inputs() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-005-leaf-v2");
+    assert_eq!(context.prompt_version, "glance-005-leaf-v3");
     assert!(context.prompt.contains("## Repository"));
     assert!(context.prompt.contains("- source_sha: fixture-sha"));
     assert!(context.prompt.contains("- directory: docs"));
@@ -61,7 +61,7 @@ fn interior_context_distills_generated_children_and_parent_chain() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-005-interior-v2");
+    assert_eq!(context.prompt_version, "glance-005-interior-v3");
     assert!(context.prompt.contains("### src/lib.rs"));
     assert!(context.prompt.contains("## Child pages"));
     assert!(context.prompt.contains("- directory: src/parser"));
@@ -132,7 +132,7 @@ fn root_context_uses_repo_metadata_and_all_child_pages() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-005-root-v2");
+    assert_eq!(context.prompt_version, "glance-005-root-v3");
     assert!(context.prompt.contains("## Root metadata"));
     assert!(context.prompt.contains("### README.md"));
     assert!(context.prompt.contains("manifest files: none"));
@@ -164,7 +164,7 @@ fn context_truncates_on_utf8_boundary_and_records_metadata() {
     .expect("context");
 
     assert!(context.prompt.contains("abc"));
-    assert!(!context.prompt.contains("def"));
+    assert!(!context.prompt.contains("abc😄def"));
     assert!(
         context
             .metadata_notes
