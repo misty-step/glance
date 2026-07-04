@@ -960,6 +960,7 @@ impl RealPageGenerator {
         )?;
         html = normalize_generated_html_citations(&html, &request.source_root, &request.directory)?;
         validate_generated_navigation(&html, request)?;
+        validate_generated_page_contract(&html)?;
         output.html = html;
         Ok(output)
     }
@@ -989,6 +990,21 @@ fn validate_generated_navigation(
         .join("; ");
     Err(GenerationError::InvalidHtml {
         message: format!("navigation validation failed: {summary}"),
+    })
+}
+
+fn validate_generated_page_contract(html: &str) -> Result<(), GenerationError> {
+    let failures = glance_check::validate_page_contract(html);
+    if failures.is_empty() {
+        return Ok(());
+    }
+    let summary = failures
+        .iter()
+        .map(|failure| failure.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(GenerationError::InvalidHtml {
+        message: format!("page contract validation failed: {summary}"),
     })
 }
 
@@ -1185,7 +1201,11 @@ impl ProviderClient for OpenRouterClient {
         route: &ModelRoute,
         kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
-        let response_format = catalog_response_format(kind)?;
+        let response_format = if kind == PageKind::Leaf {
+            catalog_response_format(kind)?
+        } else {
+            json!({ "type": "json_object" })
+        };
         let body = json!({
             "model": route.model,
             "messages": [

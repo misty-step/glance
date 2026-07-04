@@ -1183,6 +1183,7 @@ pub(crate) fn is_retryable_output_validation(error: &GenerationError) -> bool {
         GenerationError::InvalidHtml { message } => {
             message.contains("data-glance-cite")
                 || message.contains("navigation validation failed")
+                || message.contains("page contract validation failed")
                 || message.contains("data-glance-directory")
         }
         _ => false,
