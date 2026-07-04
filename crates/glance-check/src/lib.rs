@@ -27,12 +27,23 @@ pub struct Citation {
 
 impl Citation {
     pub fn parse(raw: &str) -> Result<Self, CheckError> {
+        let citations = Self::parse_many(raw)?;
+        if citations.len() != 1 {
+            return Err(CheckError::InvalidCitation {
+                raw: raw.trim().to_owned(),
+                message: "expected exactly one range".to_owned(),
+            });
+        }
+        Ok(citations.into_iter().next().expect("one citation"))
+    }
+
+    pub fn parse_many(raw: &str) -> Result<Vec<Self>, CheckError> {
         let raw = raw.trim();
-        let (path, range) = raw
+        let (path, ranges) = raw
             .rsplit_once(':')
             .ok_or_else(|| CheckError::InvalidCitation {
                 raw: raw.to_owned(),
-                message: "expected path:start or path:start-end".to_owned(),
+                message: "expected path:start[-end][,start[-end]...]".to_owned(),
             })?;
 
         let path = validate_relative_path(Path::new(path)).map_err(|message| {
@@ -42,26 +53,43 @@ impl Citation {
             }
         })?;
 
-        let (start_line, end_line) = match range.split_once('-') {
-            Some((start, end)) => (parse_line(raw, start)?, parse_line(raw, end)?),
-            None => {
-                let line = parse_line(raw, range)?;
-                (line, line)
-            }
-        };
+        ranges
+            .split(',')
+            .map(str::trim)
+            .filter(|range| !range.is_empty())
+            .map(|range| {
+                let (start_line, end_line) = match range.split_once('-') {
+                    Some((start, end)) => (parse_line(raw, start)?, parse_line(raw, end)?),
+                    None => {
+                        let line = parse_line(raw, range)?;
+                        (line, line)
+                    }
+                };
 
-        if start_line > end_line {
-            return Err(CheckError::InvalidCitation {
-                raw: raw.to_owned(),
-                message: "start line is after end line".to_owned(),
-            });
-        }
+                if start_line > end_line {
+                    return Err(CheckError::InvalidCitation {
+                        raw: raw.to_owned(),
+                        message: "start line is after end line".to_owned(),
+                    });
+                }
 
-        Ok(Self {
-            path,
-            start_line,
-            end_line,
-        })
+                Ok(Self {
+                    path: path.clone(),
+                    start_line,
+                    end_line,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|citations| {
+                if citations.is_empty() {
+                    Err(CheckError::InvalidCitation {
+                        raw: raw.to_owned(),
+                        message: "expected at least one range".to_owned(),
+                    })
+                } else {
+                    Ok(citations)
+                }
+            })
     }
 
     pub fn from_html(html: &str) -> Result<Vec<Self>, CheckError> {
@@ -72,13 +100,7 @@ impl Citation {
 
         for element in document.select(&selector) {
             if let Some(raw) = element.value().attr("data-glance-cite") {
-                for citation in raw
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    citations.push(Self::parse(citation)?);
-                }
+                citations.extend(Self::parse_many(raw)?);
             }
         }
 
@@ -236,6 +258,9 @@ fn validate_relative_path(path: &Path) -> std::result::Result<PathBuf, String> {
     if path.as_os_str().is_empty() {
         return Err("empty path".to_owned());
     }
+    if path.to_string_lossy().contains([':', ',']) {
+        return Err("path must not include citation separators".to_owned());
+    }
 
     let mut cleaned = PathBuf::new();
     for component in path.components() {
@@ -271,5 +296,10 @@ mod tests {
     #[test]
     fn rejects_parent_directory_citations() {
         assert!(Citation::parse("../secret:1").is_err());
+    }
+
+    #[test]
+    fn rejects_multiple_paths_in_one_citation_attribute() {
+        assert!(Citation::parse_many("src/lib.rs:1-2,README.md:1").is_err());
     }
 }
