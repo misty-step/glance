@@ -72,14 +72,14 @@ cargo run -q -p glance -- --config "$tmpdir/glance.toml" run \
   --root "$tmpdir/mini-source" \
   --site-root "$tmpdir/generated-site" \
   > "$tmpdir/run.out"
-grep -q 'would_generate=. kind=Root tier=Frontier provider=mock model=openai/gpt-5.5 max_tokens=2600 input_tokens=0 output_tokens=0 spend_micros=0' "$tmpdir/run.out"
+grep -q 'would_generate=. kind=Root tier=Frontier provider=mock model=openai/gpt-5.5 max_tokens=16000 input_tokens=0 output_tokens=0 spend_micros=0' "$tmpdir/run.out"
 grep -q 'spend_report pages=4 input_tokens=0 output_tokens=0 spend_micros=0' "$tmpdir/run.out"
 test -f "$tmpdir/generated-site/index.html"
 test -f "$tmpdir/generated-site/metadata.json"
 test -f "$tmpdir/generated-site/docs/index.html"
 test -f "$tmpdir/generated-site/src/index.html"
 test -f "$tmpdir/generated-site/src/parser/index.html"
-grep -q '"prompt_version": "glance-005-root-v2"' "$tmpdir/generated-site/metadata.json"
+grep -q '"prompt_version": "glance-005-root-v3"' "$tmpdir/generated-site/metadata.json"
 grep -q 'data-glance-section="what-this-is"' "$tmpdir/generated-site/index.html"
 grep -q 'data-glance-section="failure-edge-index"' "$tmpdir/generated-site/index.html"
 cargo run -q -p glance -- check \

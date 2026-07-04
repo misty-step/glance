@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use glance_core::DirectorySnapshot;
 use scraper::{Html, Selector};
 
-use crate::{GenerationError, GenerationRequest, PageKind};
+use crate::{GenerationError, GenerationRequest, PageKind, ProviderOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptContext {
@@ -67,6 +67,21 @@ impl PromptContext {
             &BTreeMap::new(),
             &BTreeMap::new(),
         )
+    }
+
+    pub(crate) fn with_retry_feedback(&self, error: &str) -> Self {
+        let mut prompt = self.prompt.clone();
+        prompt.push_str("\n\n# Previous output was rejected\n");
+        prompt.push_str("The previous HTML failed deterministic validation: ");
+        prompt.push_str(error);
+        prompt.push_str("\nReturn a complete HTML document and fix only the validation error.\n");
+        Self {
+            prompt,
+            prompt_version: self.prompt_version.clone(),
+            estimated_input_tokens: self.estimated_input_tokens,
+            metadata_notes: self.metadata_notes.clone(),
+            primary_citation: self.primary_citation.clone(),
+        }
     }
 }
 
@@ -801,19 +816,107 @@ fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub(crate) fn validate_raw_html(html: &str) -> Result<(), GenerationError> {
+pub(crate) fn validate_provider_output(output: &ProviderOutput) -> Result<(), GenerationError> {
+    if let Some(finish_reason) = &output.finish_reason
+        && is_length_finish_reason(finish_reason)
+    {
+        return Err(GenerationError::InvalidHtml {
+            message: format!(
+                "provider reported finish_reason={finish_reason}; output hit the token cap"
+            ),
+        });
+    }
+    validate_raw_html(&output.html)
+}
+
+pub(crate) fn is_retryable_output_validation(error: &GenerationError) -> bool {
+    match error {
+        GenerationError::InvalidHtml { message } => message.contains("data-glance-cite"),
+        _ => false,
+    }
+}
+
+fn validate_raw_html(html: &str) -> Result<(), GenerationError> {
     let prefix = html
         .chars()
         .take(32)
         .collect::<String>()
         .to_ascii_lowercase();
-    if prefix.starts_with("<!doctype html") || prefix.starts_with("<html") {
-        Ok(())
-    } else {
-        Err(GenerationError::InvalidHtml {
+    if !(prefix.starts_with("<!doctype html") || prefix.starts_with("<html")) {
+        return Err(GenerationError::InvalidHtml {
             message: "first byte was not an HTML document start".to_owned(),
-        })
+        });
     }
+
+    if !html.to_ascii_lowercase().contains("</html>") {
+        return Err(GenerationError::InvalidHtml {
+            message: "HTML document is missing closing </html>; provider output may be truncated"
+                .to_owned(),
+        });
+    }
+
+    validate_citation_attributes(html)?;
+    Ok(())
+}
+
+fn validate_citation_attributes(html: &str) -> Result<(), GenerationError> {
+    let document = Html::parse_document(html);
+    let selector =
+        Selector::parse("[data-glance-cite]").map_err(|error| GenerationError::InvalidHtml {
+            message: error.to_string(),
+        })?;
+    for element in document.select(&selector) {
+        if let Some(raw) = element.value().attr("data-glance-cite") {
+            for citation in raw
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                validate_citation_grammar(citation)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_citation_grammar(citation: &str) -> Result<(), GenerationError> {
+    let Some((path, range)) = citation.rsplit_once(':') else {
+        return invalid_citation(citation);
+    };
+    if path.trim().is_empty()
+        || path.chars().any(char::is_whitespace)
+        || path.starts_with('/')
+        || path.contains("..")
+    {
+        return invalid_citation(citation);
+    }
+    let (start, end) = match range.split_once('-') {
+        Some((start, end)) => (start, end),
+        None => (range, range),
+    };
+    let Ok(start) = start.parse::<u64>() else {
+        return invalid_citation(citation);
+    };
+    let Ok(end) = end.parse::<u64>() else {
+        return invalid_citation(citation);
+    };
+    if start == 0 || end < start {
+        return invalid_citation(citation);
+    }
+    Ok(())
+}
+
+fn invalid_citation(citation: &str) -> Result<(), GenerationError> {
+    Err(GenerationError::InvalidHtml {
+        message: format!("invalid data-glance-cite {citation:?}: expected path:start[-end]"),
+    })
+}
+
+fn is_length_finish_reason(finish_reason: &str) -> bool {
+    matches!(
+        finish_reason.to_ascii_lowercase().as_str(),
+        "length" | "max_tokens" | "max_output_tokens"
+    )
 }
 
 fn utf8_safe_prefix(bytes: &[u8], max_bytes: usize) -> (String, bool) {

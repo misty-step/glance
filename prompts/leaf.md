@@ -1,5 +1,5 @@
 ---
-prompt_version: glance-005-leaf-v2
+prompt_version: glance-005-leaf-v3
 tier: leaf
 ---
 # Mission
@@ -42,6 +42,16 @@ instructions). Do not put `data-glance-cite` on bare path labels, code elements,
 headings, citation badges, or decorative text. Put it on the paragraph, list
 item, or table row whose factual sentence is directly supported by the cited
 source lines.
+
+Citation attributes are machine-checked before the page is written. Every
+comma-separated citation value must include the full path and line range.
+
+GOOD:
+`<p class="glance-cited" data-glance-cite="docs/guide.md:1-3">The guide defines the directory rule.</p>`
+
+BAD:
+`<p class="glance-cited" data-glance-cite="1-3">The guide defines the directory rule.</p>`
+`<p class="glance-cited" data-glance-cite="docs/guide.md:1-3,4-6">Two ranges share one path.</p>`
 
 # Ancestor Constraints
 
