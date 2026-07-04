@@ -1398,13 +1398,12 @@ fn provider_catalog_schema(
         }
     })?;
     sanitize_schema_for_provider(&mut schema, keep_prefix_items);
-    if !matches!(kind, PageKind::Root | PageKind::CrossCutting) {
-        if let Some(hero_properties) = schema
+    if !matches!(kind, PageKind::Root | PageKind::CrossCutting)
+        && let Some(hero_properties) = schema
             .pointer_mut("/$defs/hero/properties")
             .and_then(Value::as_object_mut)
-        {
-            hero_properties.remove("image_request");
-        }
+    {
+        hero_properties.remove("image_request");
     }
     Ok(schema)
 }
@@ -1427,20 +1426,18 @@ fn sanitize_schema_for_provider(value: &mut Value, keep_prefix_items: bool) {
             if let Some(one_of) = map.remove("oneOf") {
                 map.insert("anyOf".to_owned(), one_of);
             }
-            if let Some(const_value) = map.get("const") {
-                if !map.contains_key("type") {
-                    let value_type = match const_value {
-                        Value::String(_) => Some("string"),
-                        Value::Bool(_) => Some("boolean"),
-                        Value::Number(number) if number.is_i64() || number.is_u64() => {
-                            Some("integer")
-                        }
-                        Value::Number(_) => Some("number"),
-                        _ => None,
-                    };
-                    if let Some(value_type) = value_type {
-                        map.insert("type".to_owned(), Value::String(value_type.to_owned()));
-                    }
+            if let Some(const_value) = map.get("const")
+                && !map.contains_key("type")
+            {
+                let value_type = match const_value {
+                    Value::String(_) => Some("string"),
+                    Value::Bool(_) => Some("boolean"),
+                    Value::Number(number) if number.is_i64() || number.is_u64() => Some("integer"),
+                    Value::Number(_) => Some("number"),
+                    _ => None,
+                };
+                if let Some(value_type) = value_type {
+                    map.insert("type".to_owned(), Value::String(value_type.to_owned()));
                 }
             }
 
