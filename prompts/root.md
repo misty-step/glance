@@ -43,17 +43,19 @@ paragraph, list item, or table row whose factual sentence is directly supported
 by the cited source lines.
 
 Citation attributes are machine-checked before the page is written. Use the
-canonical grammar `path:start-end[,start-end...]`: one repo-relative path,
-followed by one or more comma-separated ranges for that same path, including
-citations carried forward from child pages.
+canonical grammar `path:start-end[,start-end...][,path:start-end...]`: each
+comma-separated segment is either `path:start-end` or a bare `start-end` range
+that inherits the previous path, including citations carried forward from child
+pages.
 
 GOOD:
 `<p class="glance-cited" data-glance-cite="README.md:1-3">The README defines the project purpose.</p>`
 `<p class="glance-cited" data-glance-cite="README.md:1-3,5-7">The README defines two linked facts.</p>`
+`<p class="glance-cited" data-glance-cite="README.md:1-3,src/lib.rs:4-6">Two files define the project shape.</p>`
 
 BAD:
 `<p class="glance-cited" data-glance-cite="1-3">The README defines the project purpose.</p>`
-`<p class="glance-cited" data-glance-cite="README.md:1-3,src/lib.rs:4-6">Two paths share one attribute.</p>`
+`<p class="glance-cited" data-glance-cite="1-3,README.md:4-6">The first segment has no path to inherit.</p>`
 
 # Ancestor Constraints
 

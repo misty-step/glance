@@ -39,25 +39,31 @@ impl Citation {
 
     pub fn parse_many(raw: &str) -> Result<Vec<Self>, CheckError> {
         let raw = raw.trim();
-        let (path, ranges) = raw
-            .rsplit_once(':')
-            .ok_or_else(|| CheckError::InvalidCitation {
-                raw: raw.to_owned(),
-                message: "expected path:start[-end][,start[-end]...]".to_owned(),
-            })?;
-
-        let path = validate_relative_path(Path::new(path)).map_err(|message| {
-            CheckError::InvalidCitation {
-                raw: raw.to_owned(),
-                message,
-            }
-        })?;
-
-        ranges
-            .split(',')
+        let mut current_path: Option<PathBuf> = None;
+        raw.split(',')
             .map(str::trim)
-            .filter(|range| !range.is_empty())
-            .map(|range| {
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| {
+                let range = if let Some((path, range)) = segment.rsplit_once(':') {
+                    let path = validate_relative_path(Path::new(path)).map_err(|message| {
+                        CheckError::InvalidCitation {
+                            raw: raw.to_owned(),
+                            message,
+                        }
+                    })?;
+                    current_path = Some(path);
+                    range
+                } else {
+                    if current_path.is_none() {
+                        return Err(CheckError::InvalidCitation {
+                            raw: raw.to_owned(),
+                            message:
+                                "expected path:start[-end][,start[-end]...][,path:start[-end]...]"
+                                    .to_owned(),
+                        });
+                    }
+                    segment
+                };
                 let (start_line, end_line) = match range.split_once('-') {
                     Some((start, end)) => (parse_line(raw, start)?, parse_line(raw, end)?),
                     None => {
@@ -74,7 +80,10 @@ impl Citation {
                 }
 
                 Ok(Self {
-                    path: path.clone(),
+                    path: current_path
+                        .as_ref()
+                        .expect("path is set before range validation")
+                        .clone(),
                     start_line,
                     end_line,
                 })
@@ -299,7 +308,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_multiple_paths_in_one_citation_attribute() {
-        assert!(Citation::parse_many("src/lib.rs:1-2,README.md:1").is_err());
+    fn accepts_multiple_paths_in_one_citation_attribute() {
+        let citations =
+            Citation::parse_many("src/lib.rs:1-2,README.md:1").expect("multi-path citation");
+
+        assert_eq!(
+            citations,
+            vec![
+                Citation {
+                    path: PathBuf::from("src/lib.rs"),
+                    start_line: 1,
+                    end_line: 2,
+                },
+                Citation {
+                    path: PathBuf::from("README.md"),
+                    start_line: 1,
+                    end_line: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_bare_range_before_any_path() {
+        assert!(Citation::parse_many("1-2,src/lib.rs:3").is_err());
     }
 }

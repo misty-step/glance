@@ -990,39 +990,58 @@ fn normalize_citation_attribute(
     source_root: &Path,
     directory: &Path,
 ) -> Result<String, GenerationError> {
-    let parsed = parse_citation_attribute(raw)?;
-    let path = resolve_citation_path(&parsed.path, source_root, directory)?;
-    Ok(format!(
-        "{}:{}",
-        path_display(&path),
-        parsed.ranges.join(",")
-    ))
+    let citations = parse_citation_attribute(raw)?;
+    let mut normalized = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    for citation in citations {
+        let path = resolve_citation_path(&citation.path, source_root, directory)?;
+        if current_path.as_ref() == Some(&path) {
+            normalized.push(citation.range);
+        } else {
+            normalized.push(format!("{}:{}", path_display(&path), citation.range));
+            current_path = Some(path);
+        }
+    }
+    Ok(normalized.join(","))
 }
 
 struct CitationAttribute {
     path: PathBuf,
-    ranges: Vec<String>,
+    range: String,
 }
 
-fn parse_citation_attribute(raw: &str) -> Result<CitationAttribute, GenerationError> {
+fn parse_citation_attribute(raw: &str) -> Result<Vec<CitationAttribute>, GenerationError> {
     let citation = raw.trim();
-    let Some((path, ranges)) = citation.rsplit_once(':') else {
-        return invalid_citation(citation);
-    };
-    let path = parse_citation_path(citation, path)?;
-    let ranges = ranges
+    let mut current_path: Option<PathBuf> = None;
+    let citations = citation
         .split(',')
         .map(str::trim)
-        .filter(|range| !range.is_empty())
-        .map(|range| {
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let range = if let Some((path, range)) = segment.rsplit_once(':') {
+                let path = parse_citation_path(citation, path)?;
+                current_path = Some(path);
+                range
+            } else {
+                if current_path.is_none() {
+                    return invalid_citation(citation);
+                }
+                segment
+            };
             validate_citation_range(citation, range)?;
-            Ok(range.to_owned())
+            Ok(CitationAttribute {
+                path: current_path
+                    .as_ref()
+                    .expect("path is set before range validation")
+                    .clone(),
+                range: range.to_owned(),
+            })
         })
         .collect::<Result<Vec<_>, GenerationError>>()?;
-    if ranges.is_empty() {
+    if citations.is_empty() {
         return invalid_citation(citation);
     }
-    Ok(CitationAttribute { path, ranges })
+    Ok(citations)
 }
 
 fn parse_citation_path(raw: &str, path: &str) -> Result<PathBuf, GenerationError> {
@@ -1074,7 +1093,7 @@ fn validate_citation_range(raw: &str, range: &str) -> Result<(), GenerationError
 fn invalid_citation<T>(citation: &str) -> Result<T, GenerationError> {
     Err(GenerationError::InvalidHtml {
         message: format!(
-            "invalid data-glance-cite {citation:?}: expected path:start[-end][,start[-end]...]"
+            "invalid data-glance-cite {citation:?}: expected path:start[-end][,start[-end]...][,path:start[-end]...]"
         ),
     })
 }

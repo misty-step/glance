@@ -1624,6 +1624,48 @@ mod tests {
     }
 
     #[test]
+    fn real_generator_accepts_multi_path_citation_attributes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("prompts")).expect("prompts");
+        std::fs::write(temp.path().join("prompts/root.md"), "one\ntwo\nthree\n").expect("root");
+        std::fs::write(temp.path().join("prompts/leaf.md"), "one\ntwo\nthree\n").expect("leaf");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let html = r#"<!doctype html><html><body><p data-glance-cite="prompts/root.md:1-2,3-3,prompts/leaf.md:2-3">split paths</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let page = generator
+            .generate(
+                GenerationRequest::new(
+                    temp.path().to_path_buf(),
+                    PathBuf::from("."),
+                    "sha".to_owned(),
+                    PageKind::Root,
+                )
+                .with_prompt_context(PromptContext {
+                    prompt: "source prompt".to_owned(),
+                    prompt_version: "test-prompt".to_owned(),
+                    estimated_input_tokens: 1,
+                    metadata_notes: Vec::new(),
+                    primary_citation: None,
+                    degraded_children: Vec::new(),
+                }),
+            )
+            .expect("multi-path citation should be accepted");
+
+        assert!(
+            page.html
+                .contains(r#"data-glance-cite="prompts/root.md:1-2,3-3,prompts/leaf.md:2-3""#)
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn real_generator_normalizes_dir_relative_citation_paths() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(temp.path().join("src")).expect("src");

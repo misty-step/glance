@@ -42,6 +42,35 @@ fn parses_one_path_with_multiple_citation_ranges() {
 }
 
 #[test]
+fn parses_multiple_paths_with_inherited_ranges() {
+    let html =
+        r#"<!doctype html><p data-glance-cite="src/lib.rs:1-2,3-3,README.md:1">split paths</p>"#;
+
+    let citations = Citation::from_html(html).expect("citations");
+
+    assert_eq!(
+        citations,
+        vec![
+            Citation {
+                path: PathBuf::from("src/lib.rs"),
+                start_line: 1,
+                end_line: 2,
+            },
+            Citation {
+                path: PathBuf::from("src/lib.rs"),
+                start_line: 3,
+                end_line: 3,
+            },
+            Citation {
+                path: PathBuf::from("README.md"),
+                start_line: 1,
+                end_line: 1,
+            },
+        ]
+    );
+}
+
+#[test]
 fn accepts_pages_whose_citations_exist_at_pinned_sha() {
     let (repo, sha) = committed_source_repo();
     let html = std::fs::read_to_string(fixture_dir().join("generated/good.html")).expect("html");
@@ -61,6 +90,25 @@ fn checks_each_range_from_one_path_multi_range_citation() {
 
     assert!(report.is_ok(), "{report:#?}");
     assert_eq!(report.citations_checked, 2);
+}
+
+#[test]
+fn checks_each_range_from_multi_path_citation() {
+    let (repo, sha) = committed_source_repo();
+    let html =
+        r#"<!doctype html><p data-glance-cite="src/lib.rs:1-2,3-3,README.md:1">split paths</p>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+
+    assert!(report.is_ok(), "{report:#?}");
+    assert_eq!(report.citations_checked, 3);
+}
+
+#[test]
+fn rejects_bare_range_first_citation_attribute() {
+    let html = r#"<!doctype html><p data-glance-cite="1-2,src/lib.rs:3">bad</p>"#;
+
+    assert!(Citation::from_html(html).is_err());
 }
 
 #[test]
