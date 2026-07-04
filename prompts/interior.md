@@ -1,5 +1,5 @@
 ---
-prompt_version: glance-005-interior-v3
+prompt_version: glance-006-interior-v1
 tier: interior
 ---
 # Mission
@@ -18,6 +18,24 @@ maintainer.
 # Context Packet
 
 {{context_packet}}
+
+# Navigation Contract
+
+The context packet includes a `Navigation` section with repo name, own path,
+parent path, breadcrumb coordinates, ordered sibling directories, ordered child
+directories, and the exact relative hrefs to use. Every page must include a
+visible `<nav class="glance-nav">` in the header. It must contain:
+
+- `.glance-breadcrumb`: root -> ... -> current page. Link every ancestor with
+  the exact href from the Navigation packet.
+- A parent link using the exact parent href.
+- `.glance-nav-children`: link every direct child directory with the exact
+  child hrefs from the Navigation packet.
+- `.glance-nav-siblings`: either a compact sibling row or prev/next sibling
+  links using the exact sibling hrefs.
+
+Put `data-glance-directory` on the `.glance-page` body or shell. Relative links
+are machine-checked.
 
 # Architecture, Not Inventory
 
@@ -85,12 +103,47 @@ Composition must link each child page and give each child a one-line role. The
 hurt-you section may say "nothing sharp found" only when the evidence genuinely
 shows no sharp edge.
 
+# Visual Register
+
+Start from a calm, dense reference-documentation register: restrained neutral
+palette plus one accent color, monospace citation badges on factual claims,
+generous section rhythm, and real tables or definition lists instead of prose
+walls for structured facts.
+
+Use the operator-ratified flow-lanes pattern when the directory has multiple
+children or contracts that are easier to understand visually. Define one shared
+visual vocabulary of actors: child directories, local files that bind them,
+external entry points, gates, datastores, or UI surfaces. Assign each actor one
+fixed accent color plus one small line-icon glyph using CSS custom properties.
+Reuse the exact same actor color and icon in both composition cards and any
+swimlane diagram.
+
+Composition cards must be real clickable navigation cards: icon, bold
+link-like label, one-line role description, trailing "view ->" cue on hover,
+and cited role text where the role is factual. Swimlane diagrams are reserved
+for flows where cross-actor sequence is the hard part; each lane header reuses
+the actor icon/color pair, each lane body is a vertical stack of step cards
+threaded by a thin rail line, and a subtle CSS/SVG dot may animate along the
+rail. Do not turn simple flows into diagrams.
+
+# Theme Contract
+
+Light, dark, and system theming are required on every page. Implement them with
+CSS custom properties only: define the full color palette, including actor
+accent/background/border triplets, in a light `:root` block; mirror every token
+inside both `@media (prefers-color-scheme: dark)` and `[data-theme="dark"]`;
+provide `[data-theme="light"]` overrides. Add a tiny three-way
+light/dark/auto control using `localStorage`, where auto clears the stored
+choice. Never hardcode colors, borders, shadows, or diagram lines outside the
+token set.
+
 # Earned Extras
 
-Default to no diagram and no interactive. At most one inline SVG diagram is
-allowed, and only when shape carries meaning prose cannot. At most one small
-self-contained interactive is allowed, and only when operating it teaches
-behavior. Decorative widgets are forbidden.
+Pages should lean into the medium: animated SVG flow diagrams where flows
+exist, visual hierarchy over prose walls, and illustrative architecture instead
+of merely descriptive text. CSS/SVG animation is encouraged when it carries
+meaning and must respect `prefers-reduced-motion`. Interactives are allowed
+only where behavior carries meaning. Decorative widgets are forbidden.
 
 # Voice
 

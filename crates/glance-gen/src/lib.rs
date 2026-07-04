@@ -641,6 +641,7 @@ impl RealPageGenerator {
         )?;
         output.html = normalize_glance_directory_attribute(&output.html, &request.directory);
         output.html = ensure_required_navigation_links(&output.html, request)?;
+        output.html = ensure_root_flow_diagram(&output.html, request)?;
         validate_generated_navigation(&output.html, request)?;
         Ok(output)
     }
@@ -766,6 +767,45 @@ fn insert_after_opening_body(html: &str, insertion: &str) -> Option<String> {
     output.push_str(insertion);
     output.push_str(&html[body_end..]);
     Some(output)
+}
+
+fn ensure_root_flow_diagram(
+    html: &str,
+    request: &GenerationRequest,
+) -> Result<String, GenerationError> {
+    if request.directory != Path::new(".") || html.contains("glance-diagram") {
+        return Ok(html.to_owned());
+    }
+    let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
+        .map_err(|error| GenerationError::Context {
+            message: error.to_string(),
+        })?;
+    let Some(root) = snapshot.directory(Path::new(".")) else {
+        return Ok(html.to_owned());
+    };
+    let mut labels = root
+        .child_dirs
+        .iter()
+        .map(|child| path_label(child))
+        .collect::<Vec<_>>();
+    labels.sort();
+    let lanes = labels
+        .iter()
+        .take(6)
+        .enumerate()
+        .map(|(index, label)| {
+            let x = 36 + (index as i32 * 96);
+            format!(
+                r#"<g class="glance-flow-lane"><rect x="{x}" y="38" width="78" height="34" rx="6"></rect><text x="{}" y="59">{}</text></g>"#,
+                x + 39,
+                html_escape(label)
+            )
+        })
+        .collect::<String>();
+    let diagram = format!(
+        r#"<section class="glance-section glance-generated-flow"><style>@keyframes glance-flow-pulse{{0%{{opacity:.25;transform:translateX(0)}}50%{{opacity:1}}100%{{opacity:.25;transform:translateX(520px)}}}}@media (prefers-reduced-motion: reduce){{.glance-flow-dot{{display:none}}}}.glance-diagram text{{font:12px ui-monospace,monospace;text-anchor:middle;fill:currentColor}}.glance-diagram rect{{fill:transparent;stroke:currentColor;stroke-opacity:.35}}.glance-diagram path{{stroke:currentColor;stroke-opacity:.45;fill:none}}.glance-flow-dot{{animation:glance-flow-pulse 4s linear infinite;transform-box:fill-box}}</style><svg class="glance-diagram" viewBox="0 0 760 170" role="img" aria-label="Animated flow from source tree through prompts and checks into generated pages"><title>Glance generation flow</title><path d="M76 88 H684"></path>{lanes}<g><rect x="206" y="96" width="112" height="42" rx="7"></rect><text x="262" y="121">tier prompts</text></g><g><rect x="368" y="96" width="128" height="42" rx="7"></rect><text x="432" y="121">citation + nav check</text></g><g><rect x="548" y="96" width="116" height="42" rx="7"></rect><text x="606" y="121">published HTML</text></g><circle class="glance-flow-dot" cx="80" cy="88" r="6"></circle></svg></section>"#
+    );
+    Ok(insert_after_opening_body(html, &diagram).unwrap_or_else(|| html.to_owned()))
 }
 
 fn validate_generated_navigation(
@@ -1863,6 +1903,45 @@ mod tests {
         );
         assert!(page.html.contains(r#"href="../index.html""#));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn real_generator_injects_root_flow_diagram_when_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("src")).expect("src");
+        std::fs::write(temp.path().join("README.md"), "root\n").expect("readme");
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").expect("fixture");
+        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><p data-glance-cite="README.md:1">root page</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: Arc::new(AtomicUsize::new(0)),
+            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let page = generator
+            .generate(
+                GenerationRequest::new(
+                    temp.path().to_path_buf(),
+                    PathBuf::from("."),
+                    "sha".to_owned(),
+                    PageKind::Root,
+                )
+                .with_prompt_context(PromptContext {
+                    prompt: "source prompt".to_owned(),
+                    prompt_version: "test-prompt".to_owned(),
+                    estimated_input_tokens: 1,
+                    metadata_notes: Vec::new(),
+                    primary_citation: None,
+                    degraded_children: Vec::new(),
+                }),
+            )
+            .expect("root diagram should be injected");
+
+        assert!(page.html.contains("glance-diagram"));
+        assert!(page.html.contains("@keyframes glance-flow-pulse"));
+        assert!(page.html.contains("src"));
     }
 
     #[test]
