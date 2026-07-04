@@ -15,6 +15,7 @@ const KIT_CSS: &str = include_str!("../../../assets/kit.css");
 const KIT_JS: &str = include_str!("../../../assets/kit.js");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PageSpec {
     pub catalog_version: String,
     pub title: String,
@@ -63,8 +64,12 @@ impl PageSpec {
                         return Err(SpecError::new("hero may appear only once, first"));
                     }
                     hero.validate()?;
-                    if hero.image_request.is_some() && kind == PageKind::Leaf {
-                        return Err(SpecError::new("leaf pages cannot request images"));
+                    if hero.image_request.is_some()
+                        && !matches!(kind, PageKind::Root | PageKind::CrossCutting)
+                    {
+                        return Err(SpecError::new(
+                            "hero image_request is allowed only on root pages",
+                        ));
                     }
                 }
                 Component::Narrative(narrative) => {
@@ -135,7 +140,7 @@ impl PageSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Component {
     Hero(Hero),
     Narrative(Narrative),
@@ -148,6 +153,7 @@ pub enum Component {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Hero {
     pub title: String,
     pub summary: Vec<InlineNode>,
@@ -178,12 +184,14 @@ impl Hero {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatChip {
     pub label: String,
     pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Narrative {
     pub heading: String,
     pub paragraphs: Vec<Vec<InlineNode>>,
@@ -205,7 +213,7 @@ impl Narrative {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InlineNode {
     Text {
         text: String,
@@ -222,6 +230,7 @@ pub enum InlineNode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowDiagram {
     pub nodes: Vec<FlowNode>,
     pub edges: Vec<FlowEdge>,
@@ -264,6 +273,7 @@ impl FlowDiagram {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowNode {
     pub id: String,
     pub label: String,
@@ -271,6 +281,7 @@ pub struct FlowNode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowEdge {
     pub from: String,
     pub to: String,
@@ -279,6 +290,7 @@ pub struct FlowEdge {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileTable {
     pub rows: Vec<FileRow>,
 }
@@ -288,6 +300,12 @@ impl FileTable {
         for row in &self.rows {
             if row.name.trim().is_empty() {
                 return Err(SpecError::new("file_table row name is required"));
+            }
+            if row.role.trim().is_empty() {
+                return Err(SpecError::new(format!(
+                    "file_table role for {} is required",
+                    row.name
+                )));
             }
             if row.role.split_whitespace().count() > 12 {
                 return Err(SpecError::new(format!(
@@ -304,11 +322,11 @@ impl FileTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileRow {
     pub name: String,
     pub kind: FileRowKind,
     pub role: String,
-    #[serde(default)]
     pub signatures: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gotcha: Option<String>,
@@ -324,6 +342,7 @@ pub enum FileRowKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Callouts {
     pub items: Vec<Callout>,
 }
@@ -344,6 +363,7 @@ impl Callouts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Callout {
     pub kind: CalloutKind,
     pub title: String,
@@ -371,9 +391,9 @@ impl CalloutKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Disclosure {
     pub heading: String,
-    #[serde(default)]
     pub children: Vec<Component>,
 }
 
@@ -429,11 +449,13 @@ fn validate_disclosure_child(component: &Component, kind: PageKind) -> Result<us
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageFigure {
     pub image_request: ImageRequestSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageRequestSpec {
     pub intent: String,
     #[serde(default)]
@@ -450,6 +472,7 @@ impl ImageRequestSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomHtml {
     pub title: String,
     pub html: String,
@@ -470,6 +493,7 @@ impl CustomHtml {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CitationRef {
     pub path: String,
     pub lines: String,
@@ -1014,9 +1038,14 @@ fn validate_citation(path: &str, lines: &str) -> Result<(), SpecError> {
     if path.trim().is_empty() || lines.trim().is_empty() {
         return Err(SpecError::new("citation path and lines are required"));
     }
-    glance_check::Citation::parse(&format!("{path}:{lines}"))
-        .map(|_| ())
-        .map_err(|error| SpecError::new(error.to_string()))
+    for range in lines.split(',').map(str::trim) {
+        if range.is_empty() {
+            return Err(SpecError::new("citation ranges cannot be empty"));
+        }
+        glance_check::Citation::parse(&format!("{path}:{range}"))
+            .map_err(|error| SpecError::new(error.to_string()))?;
+    }
+    Ok(())
 }
 
 fn source_href(context: &RenderContext<'_>, path: &str, lines: &str) -> String {

@@ -4,16 +4,23 @@ use std::path::{Path, PathBuf};
 use glance_core::DirectorySnapshot;
 use scraper::{Html, Selector};
 
-use crate::{GenerationError, GenerationRequest, PageKind, ProviderOutput};
+use crate::{CATALOG_PROMPT_MD, GenerationError, GenerationRequest, PageKind, ProviderOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptContext {
     pub prompt: String,
     pub prompt_version: String,
     pub estimated_input_tokens: u64,
+    pub context_blocks: Vec<ContextBlockMetadata>,
     pub metadata_notes: Vec<String>,
     pub primary_citation: Option<String>,
     pub degraded_children: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBlockMetadata {
+    pub name: String,
+    pub byte_size: usize,
 }
 
 impl PromptContext {
@@ -73,13 +80,14 @@ impl PromptContext {
     pub(crate) fn with_retry_feedback(&self, error: &str) -> Self {
         let mut prompt = self.prompt.clone();
         prompt.push_str("\n\n# Previous output was rejected\n");
-        prompt.push_str("The previous HTML failed deterministic validation: ");
+        prompt.push_str("The previous page spec failed deterministic validation: ");
         prompt.push_str(error);
-        prompt.push_str("\nReturn a complete HTML document and fix only the validation error.\n");
+        prompt.push_str("\nReturn a complete JSON page spec and fix only the validation error.\n");
         Self {
             prompt,
             prompt_version: self.prompt_version.clone(),
             estimated_input_tokens: self.estimated_input_tokens,
+            context_blocks: self.context_blocks.clone(),
             metadata_notes: self.metadata_notes.clone(),
             primary_citation: self.primary_citation.clone(),
             degraded_children: self.degraded_children.clone(),
@@ -121,11 +129,13 @@ pub fn assemble_prompt_context_with_degraded(
     packet.add_tier_context(max_file_bytes, generated_pages, existing_pages)?;
     let context_packet = packet.render();
     let prompt = template.render(&context_packet, kind);
+    let context_blocks = packet.context_blocks();
     let degraded_children = packet.degraded_children();
     Ok(PromptContext {
         estimated_input_tokens: estimate_tokens(&prompt),
         prompt,
         prompt_version: template.version,
+        context_blocks,
         metadata_notes: packet.metadata_notes,
         primary_citation: packet.primary_citation,
         degraded_children,
@@ -196,6 +206,7 @@ impl PromptTemplate {
         self.body
             .replace("{{context_packet}}", context_packet)
             .replace("{{prompt_version}}", &self.version)
+            .replace("{{catalog_prompt}}", CATALOG_PROMPT_MD)
             .replace("{{tier_name}}", kind.label())
     }
 }
@@ -247,6 +258,7 @@ impl<'a> ContextPacket<'a> {
     ) -> Result<(), GenerationError> {
         self.add_repository_section();
         self.add_navigation_section();
+        self.add_file_signatures_section(max_file_bytes)?;
         match self.kind {
             PageKind::Leaf => {
                 self.add_local_files_section(max_file_bytes, LocalFileMode::Direct)?;
@@ -275,6 +287,40 @@ impl<'a> ContextPacket<'a> {
                 );
             }
         }
+        Ok(())
+    }
+
+    fn add_file_signatures_section(
+        &mut self,
+        max_file_bytes: usize,
+    ) -> Result<(), GenerationError> {
+        let files = self
+            .snapshot
+            .directory(&self.directory)
+            .map(|record| record.files.clone())
+            .unwrap_or_default();
+        let mut section = String::from("## File signatures\n");
+        if files.is_empty() {
+            section.push_str("none\n");
+        } else {
+            for file in files {
+                let signatures = extract_file_signatures_with_limit(
+                    &self.snapshot.source_root,
+                    &file,
+                    max_file_bytes,
+                )?;
+                section.push_str(&format!("- file: {}\n", path_display(&file)));
+                if signatures.is_empty() {
+                    section.push_str("  signatures: none\n");
+                } else {
+                    section.push_str("  signatures:\n");
+                    for signature in signatures {
+                        section.push_str(&format!("    - {signature}\n"));
+                    }
+                }
+            }
+        }
+        self.sections.push(section);
         Ok(())
     }
 
@@ -578,6 +624,27 @@ impl<'a> ContextPacket<'a> {
     fn render(&self) -> String {
         self.sections.join("\n")
     }
+
+    fn context_blocks(&self) -> Vec<ContextBlockMetadata> {
+        self.sections
+            .iter()
+            .map(|section| ContextBlockMetadata {
+                name: section_title(section),
+                byte_size: section.len(),
+            })
+            .collect()
+    }
+}
+
+fn section_title(section: &str) -> String {
+    section
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("## "))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .unwrap_or("unknown")
+        .to_owned()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -696,6 +763,105 @@ fn read_file_snippet(
         truncated,
         metadata_notes,
     })
+}
+
+pub fn extract_file_signatures(
+    source_root: &Path,
+    relative: &Path,
+) -> Result<Vec<String>, GenerationError> {
+    extract_file_signatures_with_limit(source_root, relative, usize::MAX)
+}
+
+fn extract_file_signatures_with_limit(
+    source_root: &Path,
+    relative: &Path,
+    max_file_bytes: usize,
+) -> Result<Vec<String>, GenerationError> {
+    let path = source_root.join(relative);
+    let bytes = std::fs::read(&path).map_err(|source| GenerationError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let (content, _) = utf8_safe_prefix(&bytes, max_file_bytes);
+    let extension = relative
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    let mut signatures = match extension {
+        "rs" => extract_rust_signatures(&content),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => extract_js_signatures(&content),
+        "py" => extract_python_signatures(&content),
+        "md" | "markdown" => extract_markdown_signatures(&content),
+        _ => Vec::new(),
+    };
+    if signatures.is_empty() {
+        signatures = content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(3)
+            .map(clean_signature_line)
+            .collect();
+    }
+    signatures.truncate(12);
+    Ok(signatures)
+}
+
+fn extract_rust_signatures(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("pub fn ")
+                || line.starts_with("pub async fn ")
+                || line.starts_with("pub struct ")
+                || line.starts_with("pub enum ")
+                || line.starts_with("pub trait ")
+        })
+        .map(clean_signature_line)
+        .collect()
+}
+
+fn extract_js_signatures(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("export ")
+                || line.starts_with("module.exports")
+                || line.starts_with("exports.")
+        })
+        .map(clean_signature_line)
+        .collect()
+}
+
+fn extract_python_signatures(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("def ") || line.starts_with("async def ") || line.starts_with("class ")
+        })
+        .map(clean_signature_line)
+        .collect()
+}
+
+fn extract_markdown_signatures(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('#'))
+        .map(clean_signature_line)
+        .collect()
+}
+
+fn clean_signature_line(line: &str) -> String {
+    line.trim_end_matches('{')
+        .trim_end_matches(';')
+        .trim()
+        .chars()
+        .take(160)
+        .collect()
 }
 
 fn distill_generated_page(directory: &Path, html: &str) -> PageDistillation {
@@ -997,61 +1163,31 @@ pub(crate) fn validate_provider_output(output: &ProviderOutput) -> Result<(), Ge
     if let Some(finish_reason) = &output.finish_reason
         && is_length_finish_reason(finish_reason)
     {
-        return Err(GenerationError::InvalidHtml {
+        return Err(GenerationError::InvalidSpec {
             message: format!(
                 "provider reported finish_reason={finish_reason}; output hit the token cap"
             ),
         });
     }
-    validate_raw_html(&output.html)
+    if output.html.trim().is_empty() {
+        return Err(GenerationError::InvalidSpec {
+            message: "provider returned empty page spec".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn is_retryable_output_validation(error: &GenerationError) -> bool {
     match error {
+        GenerationError::InvalidSpec { message } => !message.contains("finish_reason="),
         GenerationError::InvalidHtml { message } => {
             message.contains("data-glance-cite")
                 || message.contains("navigation validation failed")
+                || message.contains("page contract validation failed")
                 || message.contains("data-glance-directory")
         }
         _ => false,
     }
-}
-
-fn validate_raw_html(html: &str) -> Result<(), GenerationError> {
-    let prefix = html
-        .chars()
-        .take(32)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    if !(prefix.starts_with("<!doctype html") || prefix.starts_with("<html")) {
-        return Err(GenerationError::InvalidHtml {
-            message: "first byte was not an HTML document start".to_owned(),
-        });
-    }
-
-    if !html.to_ascii_lowercase().contains("</html>") {
-        return Err(GenerationError::InvalidHtml {
-            message: "HTML document is missing closing </html>; provider output may be truncated"
-                .to_owned(),
-        });
-    }
-
-    validate_citation_attributes(html)?;
-    Ok(())
-}
-
-fn validate_citation_attributes(html: &str) -> Result<(), GenerationError> {
-    let document = Html::parse_document(html);
-    let selector =
-        Selector::parse("[data-glance-cite]").map_err(|error| GenerationError::InvalidHtml {
-            message: error.to_string(),
-        })?;
-    for element in document.select(&selector) {
-        if let Some(raw) = element.value().attr("data-glance-cite") {
-            validate_citation_grammar(raw)?;
-        }
-    }
-    Ok(())
 }
 
 pub fn normalize_generated_html_citations(
@@ -1185,10 +1321,6 @@ fn parse_citation_path(raw: &str, path: &str) -> Result<PathBuf, GenerationError
         return invalid_citation(raw);
     }
     Ok(cleaned)
-}
-
-fn validate_citation_grammar(citation: &str) -> Result<(), GenerationError> {
-    parse_citation_attribute(citation).map(|_| ())
 }
 
 fn validate_citation_range(raw: &str, range: &str) -> Result<(), GenerationError> {

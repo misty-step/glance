@@ -87,12 +87,15 @@ impl GenerationRequest {
 pub struct GeneratedPage {
     pub html: String,
     pub prompt_version: String,
+    pub catalog_version: String,
     pub tier: ModelTier,
     pub provider: String,
     pub model: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub spend_micros: u64,
+    pub retries: u64,
+    pub context_blocks: Vec<ContextBlockMetadata>,
     pub metadata_notes: Vec<String>,
     pub degraded_children: Vec<PathBuf>,
 }
@@ -144,7 +147,8 @@ pub struct PageSpend {
 
 mod context;
 pub use context::{
-    PromptContext, assemble_prompt_context, assemble_prompt_context_with_degraded,
+    ContextBlockMetadata, PromptContext, assemble_prompt_context,
+    assemble_prompt_context_with_degraded, extract_file_signatures,
     normalize_generated_html_citations,
 };
 mod images;
@@ -244,12 +248,15 @@ impl PageGenerator for MockProvider {
         Ok(GeneratedPage {
             html,
             prompt_version: prompt_context.prompt_version,
+            catalog_version: CATALOG_VERSION.to_owned(),
             tier,
             provider: "mock".to_owned(),
             model: route.model.clone(),
             input_tokens: 0,
             output_tokens: 0,
             spend_micros: 0,
+            retries: 0,
+            context_blocks: prompt_context.context_blocks,
             metadata_notes: prompt_context.metadata_notes,
             degraded_children: prompt_context.degraded_children,
         })
@@ -350,6 +357,7 @@ fn mock_page_spec(
     components.push(Component::FileTable(mock_file_table(
         snapshot,
         &request.directory,
+        &request.source_root,
         citation,
     )));
     components.push(Component::Disclosure(Disclosure {
@@ -417,6 +425,7 @@ fn mock_flow(snapshot: &glance_core::DirectorySnapshot, directory: &Path) -> Flo
 fn mock_file_table(
     snapshot: &glance_core::DirectorySnapshot,
     directory: &Path,
+    source_root: &Path,
     citation: Option<&str>,
 ) -> FileTable {
     let Some(record) = snapshot.directory(directory) else {
@@ -439,7 +448,7 @@ fn mock_file_table(
             name: path_label(file),
             kind: FileRowKind::File,
             role: "Local file included in this room.".to_owned(),
-            signatures: Vec::new(),
+            signatures: extract_file_signatures(source_root, file).unwrap_or_default(),
             gotcha: None,
             cite: cite.clone(),
         });
@@ -504,14 +513,6 @@ fn page_kind_label(kind: PageKind) -> &'static str {
         PageKind::Interior => "interior",
         PageKind::Root | PageKind::CrossCutting => "root",
     }
-}
-
-fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -774,6 +775,7 @@ pub trait ProviderClient: Send + Sync {
         &self,
         prompt: &PromptContext,
         route: &ModelRoute,
+        kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError>;
 }
 
@@ -828,48 +830,54 @@ impl PageGenerator for RealPageGenerator {
             .expect("budget mutex")
             .reserve(estimated_micros)?;
 
-        let output = match self.client.generate_once(&prompt, route) {
-            Ok(output) => output,
-            Err(error) => {
-                self.release_reservation(estimated_micros);
-                return Err(error);
-            }
-        };
-        let output = match self.postprocess_output(output, &request) {
-            Ok(output) => output,
-            Err(error) if is_retryable_output_validation(&error) => {
-                let prompt = prompt.with_retry_feedback(&error.to_string());
-                let retry_output = match self.client.generate_once(&prompt, route) {
+        let mut retries = 0;
+        let mut total_input_tokens = 0;
+        let mut total_output_tokens = 0;
+        let mut total_spend_micros = 0;
+        let validation_attempts = self.client.validation_attempts();
+        let mut attempt_prompt = prompt.clone();
+        let output = loop {
+            let provider_output =
+                match self
+                    .client
+                    .generate_once(&attempt_prompt, route, request.kind)
+                {
                     Ok(output) => output,
                     Err(error) => {
                         self.release_reservation(estimated_micros);
                         return Err(error);
                     }
                 };
-                match self.postprocess_output(retry_output, &request) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        self.release_reservation(estimated_micros);
-                        return Err(error);
-                    }
+            record_output_usage(
+                route,
+                &provider_output,
+                &mut total_input_tokens,
+                &mut total_output_tokens,
+                &mut total_spend_micros,
+            );
+            match self.postprocess_output(provider_output, &request) {
+                Ok(output) => break output,
+                Err(error)
+                    if is_retryable_output_validation(&error)
+                        && retries + 1 < validation_attempts =>
+                {
+                    retries += 1;
+                    attempt_prompt = prompt.with_retry_feedback(&error.to_string());
                 }
-            }
-            Err(error) => {
-                self.release_reservation(estimated_micros);
-                return Err(error);
+                Err(error) => {
+                    self.release_reservation(estimated_micros);
+                    return Err(error);
+                }
             }
         };
 
-        let spend_micros = output.spend_micros.unwrap_or_else(|| {
-            route.estimate_cost_micros(output.input_tokens, output.output_tokens)
-        });
         let page_spend = PageSpend {
             directory: request.directory.clone(),
             provider: output.provider.clone(),
             model: output.model.clone(),
-            input_tokens: output.input_tokens,
-            output_tokens: output.output_tokens,
-            spend_micros,
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+            spend_micros: total_spend_micros,
         };
         self.budget
             .lock()
@@ -879,16 +887,34 @@ impl PageGenerator for RealPageGenerator {
         Ok(GeneratedPage {
             html: output.html,
             prompt_version: prompt.prompt_version,
+            catalog_version: CATALOG_VERSION.to_owned(),
             tier: route.tier,
             provider: output.provider,
             model: output.model,
-            input_tokens: output.input_tokens,
-            output_tokens: output.output_tokens,
-            spend_micros,
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+            spend_micros: total_spend_micros,
+            retries,
+            context_blocks: prompt.context_blocks,
             metadata_notes: prompt.metadata_notes,
             degraded_children: prompt.degraded_children,
         })
     }
+}
+
+fn record_output_usage(
+    route: &ModelRoute,
+    output: &ProviderOutput,
+    total_input_tokens: &mut u64,
+    total_output_tokens: &mut u64,
+    total_spend_micros: &mut u64,
+) {
+    *total_input_tokens = total_input_tokens.saturating_add(output.input_tokens);
+    *total_output_tokens = total_output_tokens.saturating_add(output.output_tokens);
+    let spend_micros = output
+        .spend_micros
+        .unwrap_or_else(|| route.estimate_cost_micros(output.input_tokens, output.output_tokens));
+    *total_spend_micros = total_spend_micros.saturating_add(spend_micros);
 }
 
 impl RealPageGenerator {
@@ -898,16 +924,34 @@ impl RealPageGenerator {
         request: &GenerationRequest,
     ) -> Result<ProviderOutput, GenerationError> {
         validate_provider_output(&output)?;
-        output.html = normalize_generated_html_citations(
-            &output.html,
-            &request.source_root,
-            &request.directory,
+        let spec_json = extract_json_object(&output.html)?;
+        let spec = serde_json::from_str::<PageSpec>(&spec_json).map_err(|error| {
+            GenerationError::InvalidSpec {
+                message: error.to_string(),
+            }
+        })?;
+        let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
+            .map_err(|error| GenerationError::Context {
+                message: error.to_string(),
+            })?;
+        let mut html = render_page_spec(
+            &spec,
+            &RenderContext {
+                snapshot: &snapshot,
+                directory: &request.directory,
+                source_sha: &request.source_sha,
+                prompt_version: request
+                    .prompt_context
+                    .as_ref()
+                    .map(|context| context.prompt_version.as_str())
+                    .unwrap_or("unknown"),
+                kind: request.kind,
+            },
         )?;
-        output.html = normalize_glance_directory_attribute(&output.html, &request.directory);
-        output.html = ensure_required_navigation_links(&output.html, request)?;
-        output.html = ensure_root_flow_diagram(&output.html, request)?;
-        output.html = ensure_root_image_request(&output.html, request)?;
-        validate_generated_navigation(&output.html, request)?;
+        html = normalize_generated_html_citations(&html, &request.source_root, &request.directory)?;
+        validate_generated_navigation(&html, request)?;
+        validate_generated_page_contract(&html)?;
+        output.html = html;
         Ok(output)
     }
 
@@ -915,196 +959,6 @@ impl RealPageGenerator {
         let mut budget = self.budget.lock().expect("budget mutex");
         budget.reserved_micros = budget.reserved_micros.saturating_sub(estimated_micros);
     }
-}
-
-fn normalize_glance_directory_attribute(html: &str, directory: &Path) -> String {
-    let directory = html_escape(&path_label(directory));
-    let mut output = String::with_capacity(html.len());
-    let mut cursor = 0;
-    let needle = "data-glance-directory";
-    let bytes = html.as_bytes();
-
-    while let Some(relative) = html[cursor..].find(needle) {
-        let attr_start = cursor + relative;
-        let mut index = attr_start + needle.len();
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        if bytes.get(index) != Some(&b'=') {
-            if bytes
-                .get(index)
-                .is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
-            {
-                output.push_str(&html[cursor..attr_start + needle.len()]);
-                output.push_str(&format!("=\"{directory}\""));
-                cursor = attr_start + needle.len();
-                continue;
-            }
-            output.push_str(&html[cursor..index]);
-            cursor = index;
-            continue;
-        }
-        index += 1;
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        let Some(quote) = bytes.get(index).copied() else {
-            output.push_str(&html[cursor..]);
-            return output;
-        };
-        if quote != b'"' && quote != b'\'' {
-            output.push_str(&html[cursor..=index]);
-            cursor = index + 1;
-            continue;
-        }
-        let value_start = index + 1;
-        let Some(value_end) = html[value_start..]
-            .find(char::from(quote))
-            .map(|relative| value_start + relative)
-        else {
-            output.push_str(&html[cursor..]);
-            return output;
-        };
-
-        output.push_str(&html[cursor..value_start]);
-        output.push_str(&directory);
-        output.push(char::from(quote));
-        cursor = value_end + 1;
-    }
-
-    output.push_str(&html[cursor..]);
-    output
-}
-
-fn ensure_required_navigation_links(
-    html: &str,
-    request: &GenerationRequest,
-) -> Result<String, GenerationError> {
-    let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
-        .map_err(|error| GenerationError::Context {
-            message: error.to_string(),
-        })?;
-    let Some(record) = snapshot.directory(&request.directory) else {
-        return Ok(html.to_owned());
-    };
-
-    let mut links = Vec::new();
-    if request.directory != Path::new(".") {
-        let parent = request
-            .directory
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        links.push(format!(
-            r#"<a class="glance-nav-parent" href="{}">Parent</a>"#,
-            html_escape(&glance_check::directory_href(&request.directory, parent))
-        ));
-    }
-    let mut children = record.child_dirs.clone();
-    children.sort();
-    for child in children {
-        links.push(format!(
-            r#"<a class="glance-nav-child" href="{}">{}</a>"#,
-            html_escape(&glance_check::directory_href(&request.directory, &child)),
-            html_escape(&path_label(&child))
-        ));
-    }
-
-    if links.is_empty() {
-        return Ok(html.to_owned());
-    }
-
-    let nav = format!(
-        r#"<nav class="glance-nav glance-nav-generated" aria-label="Generated navigation">{}</nav>"#,
-        links.join("")
-    );
-    Ok(insert_after_opening_body(html, &nav).unwrap_or_else(|| html.to_owned()))
-}
-
-fn insert_after_opening_body(html: &str, insertion: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let body_start = lower.find("<body")?;
-    let body_end = html[body_start..]
-        .find('>')
-        .map(|offset| body_start + offset + 1)?;
-    let mut output = String::with_capacity(html.len() + insertion.len());
-    output.push_str(&html[..body_end]);
-    output.push_str(insertion);
-    output.push_str(&html[body_end..]);
-    Some(output)
-}
-
-fn ensure_root_flow_diagram(
-    html: &str,
-    request: &GenerationRequest,
-) -> Result<String, GenerationError> {
-    if request.directory != Path::new(".") || html.contains("glance-diagram") {
-        return Ok(html.to_owned());
-    }
-    let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
-        .map_err(|error| GenerationError::Context {
-            message: error.to_string(),
-        })?;
-    let Some(root) = snapshot.directory(Path::new(".")) else {
-        return Ok(html.to_owned());
-    };
-    let mut labels = root
-        .child_dirs
-        .iter()
-        .map(|child| path_label(child))
-        .collect::<Vec<_>>();
-    labels.sort();
-    let lanes = labels
-        .iter()
-        .take(6)
-        .enumerate()
-        .map(|(index, label)| {
-            let x = 36 + (index as i32 * 96);
-            format!(
-                r#"<g class="glance-flow-lane"><rect x="{x}" y="38" width="78" height="34" rx="6"></rect><text x="{}" y="59">{}</text></g>"#,
-                x + 39,
-                html_escape(label)
-            )
-        })
-        .collect::<String>();
-    let diagram = format!(
-        r#"<section class="glance-section glance-generated-flow"><style>@keyframes glance-flow-pulse{{0%{{opacity:.25;transform:translateX(0)}}50%{{opacity:1}}100%{{opacity:.25;transform:translateX(520px)}}}}@media (prefers-reduced-motion: reduce){{.glance-flow-dot{{display:none}}}}.glance-diagram text{{font:12px ui-monospace,monospace;text-anchor:middle;fill:currentColor}}.glance-diagram rect{{fill:transparent;stroke:currentColor;stroke-opacity:.35}}.glance-diagram path{{stroke:currentColor;stroke-opacity:.45;fill:none}}.glance-flow-dot{{animation:glance-flow-pulse 4s linear infinite;transform-box:fill-box}}</style><svg class="glance-diagram" viewBox="0 0 760 170" role="img" aria-label="Animated flow from source tree through prompts and checks into generated pages"><title>Glance generation flow</title><path d="M76 88 H684"></path>{lanes}<g><rect x="206" y="96" width="112" height="42" rx="7"></rect><text x="262" y="121">tier prompts</text></g><g><rect x="368" y="96" width="128" height="42" rx="7"></rect><text x="432" y="121">citation + nav check</text></g><g><rect x="548" y="96" width="116" height="42" rx="7"></rect><text x="606" y="121">published HTML</text></g><circle class="glance-flow-dot" cx="80" cy="88" r="6"></circle></svg></section>"#
-    );
-    Ok(insert_after_opening_body(html, &diagram).unwrap_or_else(|| html.to_owned()))
-}
-
-fn ensure_root_image_request(
-    html: &str,
-    request: &GenerationRequest,
-) -> Result<String, GenerationError> {
-    if request.directory != Path::new(".")
-        || html.contains("data-glance-image-prompt")
-        || html.contains("glance-image")
-    {
-        return Ok(html.to_owned());
-    }
-    let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
-        .map_err(|error| GenerationError::Context {
-            message: error.to_string(),
-        })?;
-    let Some(root) = snapshot.directory(Path::new(".")) else {
-        return Ok(html.to_owned());
-    };
-    let mut labels = root
-        .child_dirs
-        .iter()
-        .map(|child| path_label(child))
-        .collect::<Vec<_>>();
-    labels.sort();
-    let prompt = format!(
-        "Create a clean architectural illustration for the Glance documentation generator. Show a source tree with these root areas: {}. Show tier prompts, deterministic citation/navigation checks, and published HTML pages connected by directional flow. Use legible geometric blocks, restrained color, no tiny text, and no logos.",
-        labels.join(", ")
-    );
-    let figure = format!(
-        r#"<figure class="glance-image-request" data-glance-image-prompt="{}" data-glance-image-alt="Glance repository architecture illustration"></figure>"#,
-        html_escape(&prompt)
-    );
-    Ok(insert_after_opening_body(html, &figure).unwrap_or_else(|| html.to_owned()))
 }
 
 fn validate_generated_navigation(
@@ -1129,6 +983,21 @@ fn validate_generated_navigation(
     })
 }
 
+fn validate_generated_page_contract(html: &str) -> Result<(), GenerationError> {
+    let failures = glance_check::validate_page_contract(html);
+    if failures.is_empty() {
+        return Ok(());
+    }
+    let summary = failures
+        .iter()
+        .map(|failure| failure.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(GenerationError::InvalidHtml {
+        message: format!("page contract validation failed: {summary}"),
+    })
+}
+
 pub struct FallbackClient {
     providers: Vec<Box<dyn ProviderClient>>,
     retry: RetryConfig,
@@ -1137,6 +1006,10 @@ pub struct FallbackClient {
 impl FallbackClient {
     pub fn new(providers: Vec<Box<dyn ProviderClient>>, retry: RetryConfig) -> Self {
         Self { providers, retry }
+    }
+
+    fn validation_attempts(&self) -> u64 {
+        self.retry.max_attempts.max(1) as u64 + 1
     }
 }
 
@@ -1153,6 +1026,7 @@ impl ProviderClient for FallbackClient {
         &self,
         prompt: &PromptContext,
         route: &ModelRoute,
+        kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
         if self.providers.is_empty() {
             return Err(GenerationError::Provider {
@@ -1165,7 +1039,7 @@ impl ProviderClient for FallbackClient {
         let mut last_error = None;
         for attempt in 0..self.retry.max_attempts.max(1) {
             for provider in self.matching_providers(route.provider) {
-                match provider.generate_once(prompt, route) {
+                match provider.generate_once(prompt, route, kind) {
                     Ok(output) => return Ok(output),
                     Err(error) if is_retryable(&error) => {
                         last_error = Some(error);
@@ -1253,7 +1127,9 @@ impl HttpTransport for UreqTransport {
         headers: &[(&str, String)],
         body: &Value,
     ) -> Result<HttpResponse, GenerationError> {
-        let mut request = ureq::post(url).set("Content-Type", "application/json");
+        let mut request = ureq::post(url)
+            .timeout(Duration::from_secs(120))
+            .set("Content-Type", "application/json");
         for (name, value) in headers {
             request = request.set(name, value);
         }
@@ -1317,19 +1193,27 @@ impl ProviderClient for OpenRouterClient {
         &self,
         prompt: &PromptContext,
         route: &ModelRoute,
+        kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
+        let response_format = match kind {
+            PageKind::Leaf => catalog_response_format(kind, true, true)?,
+            PageKind::Root | PageKind::CrossCutting => catalog_response_format(kind, false, false)?,
+            PageKind::Interior => json!({ "type": "json_object" }),
+        };
         let body = json!({
             "model": route.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "You generate cited, self-contained HTML pages for glance. Return only raw HTML; no prose or Markdown fences."
+                    "content": "You generate Glance page specs. Return only one JSON object matching the supplied catalog; no Markdown fences or prose."
                 },
                 {
                     "role": "user",
                     "content": prompt.prompt
                 }
             ],
+            "response_format": response_format,
+            "reasoning": { "effort": "none", "exclude": true },
             "max_completion_tokens": route.max_tokens,
             "stream": false
         });
@@ -1420,6 +1304,7 @@ impl ProviderClient for GeminiClient {
         &self,
         prompt: &PromptContext,
         route: &ModelRoute,
+        _kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
         let model = route.model.trim_start_matches("models/");
         let endpoint = format!(
@@ -1436,7 +1321,8 @@ impl ProviderClient for GeminiClient {
                 }
             ],
             "generationConfig": {
-                "maxOutputTokens": route.max_tokens
+                "maxOutputTokens": route.max_tokens,
+                "responseMimeType": "application/json"
             }
         });
         let headers = vec![("x-goog-api-key", self.api_key.clone())];
@@ -1486,6 +1372,88 @@ impl ProviderClient for GeminiClient {
     }
 }
 
+fn catalog_response_format(
+    kind: PageKind,
+    strict: bool,
+    keep_prefix_items: bool,
+) -> Result<Value, GenerationError> {
+    let schema = provider_catalog_schema(kind, keep_prefix_items)?;
+    Ok(json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "glance_page_spec",
+            "strict": strict,
+            "schema": schema,
+        }
+    }))
+}
+
+fn provider_catalog_schema(
+    kind: PageKind,
+    keep_prefix_items: bool,
+) -> Result<Value, GenerationError> {
+    let mut schema = serde_json::from_str::<Value>(CATALOG_SCHEMA_JSON).map_err(|error| {
+        GenerationError::InvalidSpec {
+            message: format!("catalog schema is invalid JSON: {error}"),
+        }
+    })?;
+    sanitize_schema_for_provider(&mut schema, keep_prefix_items);
+    if !matches!(kind, PageKind::Root | PageKind::CrossCutting)
+        && let Some(hero_properties) = schema
+            .pointer_mut("/$defs/hero/properties")
+            .and_then(Value::as_object_mut)
+    {
+        hero_properties.remove("image_request");
+    }
+    Ok(schema)
+}
+
+fn sanitize_schema_for_provider(value: &mut Value, keep_prefix_items: bool) {
+    match value {
+        Value::Object(map) => {
+            map.remove("$schema");
+            map.remove("$id");
+            if map.get("title").is_some_and(Value::is_string) {
+                map.remove("title");
+            }
+            if !keep_prefix_items {
+                map.remove("prefixItems");
+            }
+            map.remove("contains");
+            map.remove("minItems");
+            map.remove("maxItems");
+
+            if let Some(one_of) = map.remove("oneOf") {
+                map.insert("anyOf".to_owned(), one_of);
+            }
+            if let Some(const_value) = map.get("const")
+                && !map.contains_key("type")
+            {
+                let value_type = match const_value {
+                    Value::String(_) => Some("string"),
+                    Value::Bool(_) => Some("boolean"),
+                    Value::Number(number) if number.is_i64() || number.is_u64() => Some("integer"),
+                    Value::Number(_) => Some("number"),
+                    _ => None,
+                };
+                if let Some(value_type) = value_type {
+                    map.insert("type".to_owned(), Value::String(value_type.to_owned()));
+                }
+            }
+
+            for child in map.values_mut() {
+                sanitize_schema_for_provider(child, keep_prefix_items);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                sanitize_schema_for_provider(item, keep_prefix_items);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn provider_http_error(provider: &'static str, status: u16, body: String) -> GenerationError {
     let retryable = matches!(status, 408 | 429 | 500..=599);
     let message = format!("http {status}: {}", sanitize_error_body(&body));
@@ -1494,6 +1462,16 @@ fn provider_http_error(provider: &'static str, status: u16, body: String) -> Gen
         retryable,
         message,
     }
+}
+
+fn extract_json_object(content: &str) -> Result<String, GenerationError> {
+    let trimmed = content.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return Ok(trimmed.to_owned());
+    }
+    Err(GenerationError::InvalidSpec {
+        message: "provider output must be a single JSON object with no prose or fences".to_owned(),
+    })
 }
 
 fn sanitize_error_body(body: &str) -> String {
@@ -1668,11 +1646,12 @@ mod tests {
 
     #[test]
     fn openrouter_client_uses_chat_completion_wire_format() {
+        let content = page_spec_json("README.md", "1");
         let transport = Arc::new(RecordingTransport::with_response(HttpResponse {
             status: 200,
             body: json!({
                 "model": "deepseek/deepseek-v4-flash",
-                "choices": [{"message": {"content": "<!doctype html><p>ok</p>"}}],
+                "choices": [{"message": {"content": content}}],
                 "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18, "cost": 0.000012}
             })
             .to_string(),
@@ -1686,6 +1665,7 @@ mod tests {
             prompt: "source".to_owned(),
             prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 2,
+            context_blocks: Vec::new(),
             metadata_notes: Vec::new(),
             primary_citation: None,
             degraded_children: Vec::new(),
@@ -1697,10 +1677,11 @@ mod tests {
                 GenerationConfig::default()
                     .routing
                     .model_for(PageKind::Leaf),
+                PageKind::Leaf,
             )
             .expect("provider output");
 
-        assert_eq!(output.html, "<!doctype html><p>ok</p>");
+        assert_eq!(output.html, page_spec_json("README.md", "1"));
         assert_eq!(output.input_tokens, 11);
         assert_eq!(output.output_tokens, 7);
         assert_eq!(output.spend_micros, Some(12));
@@ -1710,16 +1691,48 @@ mod tests {
         assert_eq!(request.headers["Authorization"], "Bearer secret-key");
         assert_eq!(request.body["model"], "deepseek/deepseek-v4-flash");
         assert_eq!(request.body["max_completion_tokens"], 6_000);
+        assert_eq!(request.body["response_format"]["type"], "json_schema");
+        assert_eq!(
+            request.body["response_format"]["json_schema"]["name"],
+            "glance_page_spec"
+        );
+        assert_eq!(
+            request.body["response_format"]["json_schema"]["strict"],
+            true
+        );
+        assert_eq!(
+            request.body["response_format"]["json_schema"]["schema"]["properties"]["catalog_version"]
+                ["type"],
+            "string"
+        );
+        assert_eq!(
+            request.body["response_format"]["json_schema"]["schema"]["properties"]["title"]["type"],
+            "string"
+        );
+        assert!(
+            request.body["response_format"]["json_schema"]["schema"]["$id"].is_null(),
+            "provider schema strips catalog metadata"
+        );
+        assert!(
+            request.body["response_format"]["json_schema"]["schema"]["$defs"]["hero"]["properties"]
+                ["image_request"]
+                .is_null(),
+            "leaf provider schema forbids hero image_request"
+        );
+        assert_eq!(request.body["reasoning"]["effort"], "none");
+        assert_eq!(request.body["reasoning"]["exclude"], true);
+        assert!(request.body["plugins"].is_null());
         assert_eq!(request.body["stream"], false);
     }
 
     #[test]
     fn openrouter_client_works_against_local_mock_http_server() {
+        let content = page_spec_json("README.md", "1");
         let (endpoint, requests) = one_shot_server(
             200,
             json!({
                 "model": "deepseek/deepseek-v4-flash",
-                "choices": [{"message": {"content": "<!doctype html><p>server</p>"}}],
+                "choices": [{"message": {"content": content}}],
                 "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5, "cost": 0.000001}
             })
             .to_string(),
@@ -1730,6 +1743,7 @@ mod tests {
             prompt: "wire prompt".to_owned(),
             prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 3,
+            context_blocks: Vec::new(),
             metadata_notes: Vec::new(),
             primary_citation: None,
             degraded_children: Vec::new(),
@@ -1741,25 +1755,31 @@ mod tests {
                 GenerationConfig::default()
                     .routing
                     .model_for(PageKind::Leaf),
+                PageKind::Leaf,
             )
             .expect("server output");
 
-        assert_eq!(output.html, "<!doctype html><p>server</p>");
+        assert_eq!(output.html, page_spec_json("README.md", "1"));
         let request = requests.recv().expect("captured request");
         let request_lower = request.to_ascii_lowercase();
         assert!(request.contains("POST / HTTP/1.1"));
         assert!(request_lower.contains("authorization: bearer server-key"));
         assert!(request.contains("\"max_completion_tokens\":6000"));
         assert!(request.contains("\"model\":\"deepseek/deepseek-v4-flash\""));
+        assert!(request.contains("\"response_format\":{\"json_schema\""));
+        assert!(request.contains("\"name\":\"glance_page_spec\""));
+        assert!(request.contains("\"strict\":true"));
+        assert!(request.contains("\"reasoning\":{\"effort\":\"none\",\"exclude\":true}"));
     }
 
     #[test]
     fn gemini_client_uses_generate_content_wire_format() {
+        let content = page_spec_json("README.md", "1");
         let transport = Arc::new(RecordingTransport::with_response(HttpResponse {
             status: 200,
             body: json!({
                 "candidates": [{
-                    "content": {"parts": [{"text": "<!doctype html><p>gemini</p>"}]}
+                    "content": {"parts": [{"text": content}]}
                 }],
                 "usageMetadata": {"promptTokenCount": 13, "candidatesTokenCount": 8, "totalTokenCount": 21}
             })
@@ -1774,6 +1794,7 @@ mod tests {
             prompt: "source".to_owned(),
             prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 2,
+            context_blocks: Vec::new(),
             metadata_notes: Vec::new(),
             primary_citation: None,
             degraded_children: Vec::new(),
@@ -1785,10 +1806,10 @@ mod tests {
         };
 
         let output = client
-            .generate_once(&prompt, &route)
+            .generate_once(&prompt, &route, PageKind::Leaf)
             .expect("provider output");
 
-        assert_eq!(output.html, "<!doctype html><p>gemini</p>");
+        assert_eq!(output.html, page_spec_json("README.md", "1"));
         assert_eq!(output.input_tokens, 13);
         assert_eq!(output.output_tokens, 8);
         assert_eq!(output.spend_micros, None);
@@ -1800,16 +1821,21 @@ mod tests {
         );
         assert_eq!(request.headers["x-goog-api-key"], "gemini-key");
         assert_eq!(request.body["generationConfig"]["maxOutputTokens"], 6_000);
+        assert_eq!(
+            request.body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
         assert_eq!(request.body["contents"][0]["parts"][0]["text"], "source");
     }
 
     #[test]
     fn gemini_client_works_against_local_mock_http_server() {
+        let content = page_spec_json("README.md", "1");
         let (endpoint_base, requests) = one_shot_server(
             200,
             json!({
                 "candidates": [{
-                    "content": {"parts": [{"text": "<!doctype html><p>native</p>"}]}
+                    "content": {"parts": [{"text": content}]}
                 }],
                 "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 4, "totalTokenCount": 9}
             })
@@ -1825,6 +1851,7 @@ mod tests {
             prompt: "gemini prompt".to_owned(),
             prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 3,
+            context_blocks: Vec::new(),
             metadata_notes: Vec::new(),
             primary_citation: None,
             degraded_children: Vec::new(),
@@ -1836,15 +1863,16 @@ mod tests {
         };
 
         let output = client
-            .generate_once(&prompt, &route)
+            .generate_once(&prompt, &route, PageKind::Leaf)
             .expect("server output");
 
-        assert_eq!(output.html, "<!doctype html><p>native</p>");
+        assert_eq!(output.html, page_spec_json("README.md", "1"));
         let request = requests.recv().expect("captured request");
         let request_lower = request.to_ascii_lowercase();
         assert!(request.contains("POST /v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1"));
         assert!(request_lower.contains("x-goog-api-key: native-key"));
         assert!(request.contains("\"maxOutputTokens\":6000"));
+        assert!(request.contains("\"responseMimeType\":\"application/json\""));
         assert!(request.contains("\"text\":\"gemini prompt\""));
     }
 
@@ -1876,6 +1904,7 @@ mod tests {
             prompt: "source".to_owned(),
             prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 2,
+            context_blocks: Vec::new(),
             metadata_notes: Vec::new(),
             primary_citation: None,
             degraded_children: Vec::new(),
@@ -1887,6 +1916,7 @@ mod tests {
                 GenerationConfig::default()
                     .routing
                     .model_for(PageKind::Leaf),
+                PageKind::Leaf,
             )
             .expect("fallback output");
 
@@ -1923,6 +1953,7 @@ mod tests {
             prompt: "source".to_owned(),
             prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 2,
+            context_blocks: Vec::new(),
             metadata_notes: Vec::new(),
             primary_citation: None,
             degraded_children: Vec::new(),
@@ -1934,7 +1965,7 @@ mod tests {
         };
 
         let error = client
-            .generate_once(&prompt, &route)
+            .generate_once(&prompt, &route, PageKind::Leaf)
             .expect_err("preferred provider error");
 
         assert!(matches!(
@@ -1988,7 +2019,7 @@ mod tests {
             attempts: attempts.clone(),
             prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
             outputs: std::sync::Mutex::new(vec![Ok(provider_output(
-                "<!doctype html><html><body><p>cut",
+                &page_spec_json("README.md", "1"),
                 Some("length"),
                 Some(1),
             ))]),
@@ -2000,84 +2031,109 @@ mod tests {
             .generate(request)
             .expect_err("length truncation must fail");
 
-        assert!(matches!(error, GenerationError::InvalidHtml { .. }));
+        assert!(matches!(error, GenerationError::InvalidSpec { .. }));
         assert!(error.to_string().contains("finish_reason=length"));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(generator.spend_report().total_pages, 0);
     }
 
     #[test]
-    fn real_generator_rejects_missing_html_close_as_truncation() {
+    fn real_generator_rejects_malformed_json_spec() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
             prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            outputs: std::sync::Mutex::new(vec![Ok(provider_output(
-                "<!doctype html><html><body><p>cut",
-                Some("stop"),
-                Some(1),
-            ))]),
-        });
-        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
-
-        let error = generator
-            .generate(request_with_prompt(PageKind::Leaf))
-            .expect_err("missing closing html must fail");
-
-        assert!(matches!(error, GenerationError::InvalidHtml { .. }));
-        assert!(error.to_string().contains("missing closing </html>"));
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(generator.spend_report().total_pages, 0);
-    }
-
-    #[test]
-    fn real_generator_retries_bad_citation_once_then_fails_loudly() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let bad_html =
-            r#"<!doctype html><html><body><p data-glance-cite="21-26">bad cite</p></body></html>"#;
-        let provider = Box::new(ScriptedClient {
-            name: "scripted",
-            attempts: attempts.clone(),
-            prompts: prompts.clone(),
             outputs: std::sync::Mutex::new(vec![
-                Ok(provider_output(bad_html, Some("stop"), Some(1))),
-                Ok(provider_output(bad_html, Some("stop"), Some(1))),
+                Ok(provider_output(
+                    "{\"catalog_version\":\"glance-catalog-001\"",
+                    Some("stop"),
+                    Some(1),
+                )),
+                Ok(provider_output(
+                    "{\"catalog_version\":\"glance-catalog-001\"",
+                    Some("stop"),
+                    Some(1),
+                )),
             ]),
         });
         let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
 
         let error = generator
             .generate(request_with_prompt(PageKind::Leaf))
-            .expect_err("bad citation must fail after retry");
+            .expect_err("malformed JSON must fail");
 
-        assert!(matches!(error, GenerationError::InvalidHtml { .. }));
-        assert!(error.to_string().contains("data-glance-cite"));
-        assert!(error.to_string().contains("path:start[-end]"));
+        assert!(matches!(error, GenerationError::InvalidSpec { .. }));
+        assert!(error.to_string().contains("single JSON object"));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        let prompts = prompts.lock().expect("prompts");
-        assert_eq!(prompts.len(), 2);
-        assert!(prompts[1].contains("Previous output was rejected"));
-        assert!(prompts[1].contains("data-glance-cite"));
         assert_eq!(generator.spend_report().total_pages, 0);
     }
 
     #[test]
-    fn real_generator_retries_missing_navigation_then_accepts_fixed_page() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("README.md"), "one\n").expect("fixture");
+    fn real_generator_retries_bad_spec_once_then_fails_loudly() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let bad_html = r#"<!doctype html><html><body><p data-glance-cite="README.md:1">missing nav</p></body></html>"#;
-        let good_html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"></nav><p data-glance-cite="README.md:1">fixed nav</p></body></html>"#;
+        let bad_spec = page_spec_json("README.md", "not-lines");
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
             prompts: prompts.clone(),
             outputs: std::sync::Mutex::new(vec![
-                Ok(provider_output(good_html, Some("stop"), Some(1))),
-                Ok(provider_output(bad_html, Some("stop"), Some(1))),
+                Ok(provider_output(&bad_spec, Some("stop"), Some(1))),
+                Ok(provider_output(&bad_spec, Some("stop"), Some(1))),
+            ]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let error = generator
+            .generate(request_with_prompt(PageKind::Leaf))
+            .expect_err("bad spec must fail after retry");
+
+        assert!(matches!(error, GenerationError::InvalidSpec { .. }));
+        assert!(error.to_string().contains("invalid citation"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let prompts = prompts.lock().expect("prompts");
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("Previous output was rejected"));
+        assert!(prompts[1].contains("page spec"));
+        assert_eq!(generator.spend_report().total_pages, 0);
+    }
+
+    #[test]
+    fn real_generator_retries_invalid_spec_then_accepts_fixed_spec() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("README.md"), "one\n").expect("fixture");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bad_spec = json!({
+            "catalog_version": CATALOG_VERSION,
+            "title": "Bad spec",
+            "components": [
+                {
+                    "type": "hero",
+                    "title": "Bad spec",
+                    "summary": [{ "type": "cite", "text": "The source defines the fixture.", "path": "README.md", "lines": "1" }],
+                    "stats": [
+                        { "label": "files", "value": "1" },
+                        { "label": "tier", "value": "root" }
+                    ]
+                },
+                {
+                    "type": "narrative",
+                    "heading": "At 10,000 feet",
+                    "paragraphs": [[{ "type": "cite", "text": "The source gives evidence.", "path": "README.md", "lines": "1" }]]
+                }
+            ]
+        })
+        .to_string();
+        let good_spec = page_spec_json("README.md", "1");
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: prompts.clone(),
+            outputs: std::sync::Mutex::new(vec![
+                Ok(provider_output(&good_spec, Some("stop"), Some(1))),
+                Ok(provider_output(&bad_spec, Some("stop"), Some(1))),
             ]),
         });
         let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
@@ -2094,86 +2150,50 @@ mod tests {
                     prompt: "source prompt".to_owned(),
                     prompt_version: "test-prompt".to_owned(),
                     estimated_input_tokens: 1,
+                    context_blocks: Vec::new(),
                     metadata_notes: Vec::new(),
                     primary_citation: None,
                     degraded_children: Vec::new(),
                 }),
             )
-            .expect("navigation retry should recover");
+            .expect("spec retry should recover");
 
         assert!(page.html.contains("data-glance-directory"));
+        assert_eq!(page.retries, 1);
+        assert_eq!(page.input_tokens, 2);
+        assert_eq!(page.output_tokens, 2);
+        assert_eq!(page.spend_micros, 2);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let spend_report = generator.spend_report();
+        assert_eq!(spend_report.total_pages, 1);
+        assert_eq!(spend_report.input_tokens, 2);
+        assert_eq!(spend_report.output_tokens, 2);
+        assert_eq!(spend_report.spend_micros, 2);
+        assert_eq!(spend_report.pages[0].input_tokens, 2);
+        assert_eq!(spend_report.pages[0].output_tokens, 2);
+        assert_eq!(spend_report.pages[0].spend_micros, 2);
         assert!(
             prompts
                 .lock()
                 .expect("prompts")
                 .last()
                 .expect("retry prompt")
-                .contains("navigation validation failed")
+                .contains("file_table")
         );
     }
 
     #[test]
-    fn real_generator_fills_empty_navigation_directory_placeholder() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("README.md"), "one\n").expect("fixture");
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="   "><nav class="glance-nav"></nav><p data-glance-cite="README.md:1">root page</p></body></html>"#;
-        let provider = Box::new(ScriptedClient {
-            name: "scripted",
-            attempts: attempts.clone(),
-            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
-        });
-        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
-
-        let page = generator
-            .generate(
-                GenerationRequest::new(
-                    temp.path().to_path_buf(),
-                    PathBuf::from("."),
-                    "sha".to_owned(),
-                    PageKind::Root,
-                )
-                .with_prompt_context(PromptContext {
-                    prompt: "source prompt".to_owned(),
-                    prompt_version: "test-prompt".to_owned(),
-                    estimated_input_tokens: 1,
-                    metadata_notes: Vec::new(),
-                    primary_citation: None,
-                    degraded_children: Vec::new(),
-                }),
-            )
-            .expect("empty directory placeholder should be filled");
-
-        assert!(page.html.contains(r#"data-glance-directory=".""#));
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn normalize_glance_directory_attribute_repairs_model_coordinates() {
-        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory><nav></nav></body></html>"#;
-        let wrong = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav></nav></body></html>"#;
-
-        let repaired = normalize_glance_directory_attribute(html, Path::new("src/parser"));
-        let corrected = normalize_glance_directory_attribute(wrong, Path::new("src/parser"));
-
-        assert!(repaired.contains(r#"data-glance-directory="src/parser">"#));
-        assert!(corrected.contains(r#"data-glance-directory="src/parser">"#));
-    }
-
-    #[test]
-    fn real_generator_injects_required_parent_navigation_link() {
+    fn real_generator_renders_required_parent_navigation_link() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(temp.path().join("src")).expect("src");
         std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").expect("fixture");
         let attempts = Arc::new(AtomicUsize::new(0));
-        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="src"><p data-glance-cite="lib.rs:1">source page</p></body></html>"#;
+        let spec = page_spec_json("lib.rs", "1");
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
             prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(&spec, Some("stop"), Some(1)))]),
         });
         let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
 
@@ -2189,33 +2209,31 @@ mod tests {
                     prompt: "source prompt".to_owned(),
                     prompt_version: "test-prompt".to_owned(),
                     estimated_input_tokens: 1,
+                    context_blocks: Vec::new(),
                     metadata_notes: Vec::new(),
                     primary_citation: None,
                     degraded_children: Vec::new(),
                 }),
             )
-            .expect("parent link should be injected");
+            .expect("parent link should be rendered");
 
-        assert!(
-            page.html
-                .contains(r#"class="glance-nav glance-nav-generated""#)
-        );
+        assert!(page.html.contains(r#"class="glance-parent-link""#));
         assert!(page.html.contains(r#"href="../index.html""#));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn real_generator_injects_root_flow_diagram_when_missing() {
+    fn real_generator_renders_root_flow_diagram_and_image_request() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(temp.path().join("src")).expect("src");
         std::fs::write(temp.path().join("README.md"), "root\n").expect("readme");
         std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").expect("fixture");
-        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><p data-glance-cite="README.md:1">root page</p></body></html>"#;
+        let spec = root_flow_image_spec_json("README.md", "1");
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: Arc::new(AtomicUsize::new(0)),
             prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(&spec, Some("stop"), Some(1)))]),
         });
         let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
 
@@ -2231,20 +2249,18 @@ mod tests {
                     prompt: "source prompt".to_owned(),
                     prompt_version: "test-prompt".to_owned(),
                     estimated_input_tokens: 1,
+                    context_blocks: Vec::new(),
                     metadata_notes: Vec::new(),
                     primary_citation: None,
                     degraded_children: Vec::new(),
                 }),
             )
-            .expect("root diagram should be injected");
+            .expect("root diagram should be rendered");
 
-        assert!(page.html.contains("glance-diagram"));
-        assert!(page.html.contains("@keyframes glance-flow-pulse"));
+        assert!(page.html.contains("glance-flow-diagram"));
+        assert!(page.html.contains("glance-flow-pulse"));
         assert!(page.html.contains("data-glance-image-prompt"));
-        assert!(
-            page.html
-                .contains("Glance repository architecture illustration")
-        );
+        assert!(page.html.contains("top-level dirs: src"));
         assert!(page.html.contains("src"));
     }
 
@@ -2254,12 +2270,12 @@ mod tests {
         std::fs::create_dir(temp.path().join("src")).expect("src");
         std::fs::write(temp.path().join("src/lib.rs"), "one\ntwo\nthree\n").expect("fixture");
         let attempts = Arc::new(AtomicUsize::new(0));
-        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"><a href="src/index.html">src</a></nav><p data-glance-cite="src/lib.rs:1-2,3-3">split cite</p></body></html>"#;
+        let spec = page_spec_json("src/lib.rs", "1-2,3-3");
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
             prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(&spec, Some("stop"), Some(1)))]),
         });
         let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
 
@@ -2275,6 +2291,7 @@ mod tests {
                     prompt: "source prompt".to_owned(),
                     prompt_version: "test-prompt".to_owned(),
                     estimated_input_tokens: 1,
+                    context_blocks: Vec::new(),
                     metadata_notes: Vec::new(),
                     primary_citation: None,
                     degraded_children: Vec::new(),
@@ -2296,12 +2313,12 @@ mod tests {
         std::fs::write(temp.path().join("prompts/root.md"), "one\ntwo\nthree\n").expect("root");
         std::fs::write(temp.path().join("prompts/leaf.md"), "one\ntwo\nthree\n").expect("leaf");
         let attempts = Arc::new(AtomicUsize::new(0));
-        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"><a href="prompts/index.html">prompts</a></nav><p data-glance-cite="prompts/root.md:1-2,3-3,prompts/leaf.md:2-3">split paths</p></body></html>"#;
+        let spec = multi_cite_spec_json("prompts/root.md", "1-2,3-3", "prompts/leaf.md", "2-3");
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
             prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(&spec, Some("stop"), Some(1)))]),
         });
         let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
 
@@ -2317,6 +2334,7 @@ mod tests {
                     prompt: "source prompt".to_owned(),
                     prompt_version: "test-prompt".to_owned(),
                     estimated_input_tokens: 1,
+                    context_blocks: Vec::new(),
                     metadata_notes: Vec::new(),
                     primary_citation: None,
                     degraded_children: Vec::new(),
@@ -2326,7 +2344,11 @@ mod tests {
 
         assert!(
             page.html
-                .contains(r#"data-glance-cite="prompts/root.md:1-2,3-3,prompts/leaf.md:2-3""#)
+                .contains(r#"data-glance-cite="prompts/root.md:1-2,3-3""#)
+        );
+        assert!(
+            page.html
+                .contains(r#"data-glance-cite="prompts/leaf.md:2-3""#)
         );
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
@@ -2337,12 +2359,12 @@ mod tests {
         std::fs::create_dir(temp.path().join("src")).expect("src");
         std::fs::write(temp.path().join("src/lib.rs"), "one\n").expect("fixture");
         let attempts = Arc::new(AtomicUsize::new(0));
-        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="src"><nav class="glance-nav"><a href="../index.html">Parent</a></nav><p data-glance-cite="lib.rs:1">dir-relative cite</p></body></html>"#;
+        let spec = page_spec_json("lib.rs", "1");
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
             prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(&spec, Some("stop"), Some(1)))]),
         });
         let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
 
@@ -2358,6 +2380,7 @@ mod tests {
                     prompt: "source prompt".to_owned(),
                     prompt_version: "test-prompt".to_owned(),
                     estimated_input_tokens: 1,
+                    context_blocks: Vec::new(),
                     metadata_notes: Vec::new(),
                     primary_citation: None,
                     degraded_children: Vec::new(),
@@ -2376,14 +2399,14 @@ mod tests {
         std::fs::write(temp.path().join("src/lib.rs"), "one\n").expect("fixture");
         let attempts = Arc::new(AtomicUsize::new(0));
         let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let html = r#"<!doctype html><html><body><p data-glance-cite="missing.rs:1">missing cite</p></body></html>"#;
+        let spec = page_spec_json("missing.rs", "1");
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
             prompts: prompts.clone(),
             outputs: std::sync::Mutex::new(vec![
-                Ok(provider_output(html, Some("stop"), Some(1))),
-                Ok(provider_output(html, Some("stop"), Some(1))),
+                Ok(provider_output(&spec, Some("stop"), Some(1))),
+                Ok(provider_output(&spec, Some("stop"), Some(1))),
             ]),
         });
         let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
@@ -2400,6 +2423,7 @@ mod tests {
                     prompt: "source prompt".to_owned(),
                     prompt_version: "test-prompt".to_owned(),
                     estimated_input_tokens: 1,
+                    context_blocks: Vec::new(),
                     metadata_notes: Vec::new(),
                     primary_citation: None,
                     degraded_children: Vec::new(),
@@ -2453,12 +2477,20 @@ mod tests {
             return;
         }
 
-        let root = PathBuf::from("crates/glance-core/tests/fixtures/mini-source");
-        let root = if root.exists() {
-            root
+        let default_root = PathBuf::from("crates/glance-core/tests/fixtures/mini-source");
+        let default_root = if default_root.exists() {
+            default_root
         } else {
             PathBuf::from("../glance-core/tests/fixtures/mini-source")
         };
+        let root = std::env::var_os("GLANCE_LIVE_SMOKE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or(default_root);
+        let directory = std::env::var_os("GLANCE_LIVE_SMOKE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("src/parser"));
+        let source_sha =
+            std::env::var("GLANCE_LIVE_SMOKE_SHA").unwrap_or_else(|_| "live-smoke".to_owned());
         let mut config = GenerationConfig {
             provider_mode: ProviderMode::Real,
             ..GenerationConfig::default()
@@ -2471,14 +2503,17 @@ mod tests {
         }
         config.budget.per_run_micros = Some(50_000);
         config.budget.per_day_micros = Some(50_000);
-        config.prompt.max_file_bytes = 4096;
+        config.prompt.max_file_bytes = std::env::var("GLANCE_LIVE_SMOKE_MAX_FILE_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(4096);
         let generator = RealPageGenerator::from_env(config).expect("real generator");
 
         let page = generator
             .generate(GenerationRequest::new(
                 root.clone(),
-                PathBuf::from("src/parser"),
-                "live-smoke".to_owned(),
+                directory,
+                source_sha,
                 PageKind::Leaf,
             ))
             .expect("live page");
@@ -2517,6 +2552,7 @@ mod tests {
             &self,
             _prompt: &PromptContext,
             _route: &ModelRoute,
+            _kind: PageKind,
         ) -> Result<ProviderOutput, GenerationError> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
             if attempt <= self.fail_until {
@@ -2555,6 +2591,7 @@ mod tests {
             &self,
             _prompt: &PromptContext,
             _route: &ModelRoute,
+            _kind: PageKind,
         ) -> Result<ProviderOutput, GenerationError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ProviderOutput {
@@ -2589,6 +2626,7 @@ mod tests {
             &self,
             prompt: &PromptContext,
             _route: &ModelRoute,
+            _kind: PageKind,
         ) -> Result<ProviderOutput, GenerationError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             self.prompts
@@ -2630,6 +2668,7 @@ mod tests {
             prompt: "source prompt".to_owned(),
             prompt_version: "test-prompt".to_owned(),
             estimated_input_tokens: 1,
+            context_blocks: Vec::new(),
             metadata_notes: Vec::new(),
             primary_citation: None,
             degraded_children: Vec::new(),
@@ -2650,6 +2689,128 @@ mod tests {
             spend_micros,
             finish_reason: finish_reason.map(str::to_owned),
         }
+    }
+
+    fn page_spec_json(path: &str, lines: &str) -> String {
+        json!({
+            "catalog_version": CATALOG_VERSION,
+            "title": "Spec fixture",
+            "components": [
+                {
+                    "type": "hero",
+                    "title": "Spec fixture",
+                    "summary": [{ "type": "cite", "text": "The source defines the fixture.", "path": path, "lines": lines }],
+                    "stats": [
+                        { "label": "files", "value": "1" },
+                        { "label": "tier", "value": "test" }
+                    ]
+                },
+                {
+                    "type": "narrative",
+                    "heading": "At 10,000 feet",
+                    "paragraphs": [[{ "type": "cite", "text": "The source gives the page its evidence.", "path": path, "lines": lines }]]
+                },
+                {
+                    "type": "file_table",
+                    "rows": []
+                },
+                {
+                    "type": "disclosure",
+                    "heading": "Full context",
+                    "children": []
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    fn root_flow_image_spec_json(path: &str, lines: &str) -> String {
+        json!({
+            "catalog_version": CATALOG_VERSION,
+            "title": "Root fixture",
+            "components": [
+                {
+                    "type": "hero",
+                    "title": "Root fixture",
+                    "summary": [{ "type": "cite", "text": "The source defines the root.", "path": path, "lines": lines }],
+                    "stats": [
+                        { "label": "files", "value": "1" },
+                        { "label": "tier", "value": "root" }
+                    ],
+                    "image_request": {
+                        "intent": "Show the source tree becoming a Glance site.",
+                        "emphasis": ["source", "site"]
+                    }
+                },
+                {
+                    "type": "narrative",
+                    "heading": "At 10,000 feet",
+                    "paragraphs": [[{ "type": "cite", "text": "The source gives the root page evidence.", "path": path, "lines": lines }]]
+                },
+                {
+                    "type": "flow_diagram",
+                    "nodes": [
+                        { "id": "source", "label": "source", "kind": "tree" },
+                        { "id": "site", "label": "generated site", "kind": "html" }
+                    ],
+                    "edges": [
+                        { "from": "source", "to": "site", "label": "renders" }
+                    ],
+                    "lanes": []
+                },
+                {
+                    "type": "file_table",
+                    "rows": []
+                },
+                {
+                    "type": "disclosure",
+                    "heading": "Full context",
+                    "children": []
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    fn multi_cite_spec_json(path_a: &str, lines_a: &str, path_b: &str, lines_b: &str) -> String {
+        json!({
+            "catalog_version": CATALOG_VERSION,
+            "title": "Multi cite fixture",
+            "components": [
+                {
+                    "type": "hero",
+                    "title": "Multi cite fixture",
+                    "summary": [
+                        { "type": "cite", "text": "The first source gives one part.", "path": path_a, "lines": lines_a },
+                        { "type": "text", "text": " " },
+                        { "type": "cite", "text": "The second source gives another part.", "path": path_b, "lines": lines_b }
+                    ],
+                    "stats": [
+                        { "label": "files", "value": "2" },
+                        { "label": "tier", "value": "test" }
+                    ]
+                },
+                {
+                    "type": "narrative",
+                    "heading": "At 10,000 feet",
+                    "paragraphs": [[
+                        { "type": "cite", "text": "The first source gives one part.", "path": path_a, "lines": lines_a },
+                        { "type": "text", "text": " " },
+                        { "type": "cite", "text": "The second source gives another part.", "path": path_b, "lines": lines_b }
+                    ]]
+                },
+                {
+                    "type": "file_table",
+                    "rows": []
+                },
+                {
+                    "type": "disclosure",
+                    "heading": "Full context",
+                    "children": []
+                }
+            ]
+        })
+        .to_string()
     }
 
     fn one_shot_server(status: u16, body: String) -> (String, mpsc::Receiver<String>) {
