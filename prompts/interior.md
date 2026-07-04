@@ -30,6 +30,8 @@ jargon unless you gloss them immediately.
 - `file_table.rows` covers local files and direct child directories. Dir rows
   link to child pages by name; file rows include exact `signatures[]` from the
   File signatures block.
+- Every `file_table` row includes `name`, `kind`, `role`, and `signatures`;
+  dir rows use `"signatures": []`.
 - Each `role` is one clause, 12 words or fewer.
 - Use `callouts` for seams, invariants, contracts, and hurt-you edges. Its
   shape is always `{ "type": "callouts", "items": [...] }`; never put `kind`,

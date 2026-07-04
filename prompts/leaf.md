@@ -34,7 +34,8 @@ jargon unless you gloss them immediately.
 - `file_table.rows` covers local files. Leaf directories have no child
   directories; if the context says empty, say so plainly and do not invent
   purpose.
-- Fill `signatures[]` only with exact text from the File signatures block.
+- Every `file_table` row includes `name`, `kind`, `role`, and `signatures`.
+  Fill `signatures[]` only with exact text from the File signatures block.
 - Each `role` is one clause, 12 words or fewer.
 
 # Citation Discipline

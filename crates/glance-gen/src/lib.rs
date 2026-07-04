@@ -1202,9 +1202,9 @@ impl ProviderClient for OpenRouterClient {
         kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
         let response_format = if kind == PageKind::Leaf {
-            catalog_response_format(kind)?
+            catalog_response_format(kind, true, true)?
         } else {
-            json!({ "type": "json_object" })
+            catalog_response_format(kind, false, false)?
         };
         let body = json!({
             "model": route.model,
@@ -1220,7 +1220,6 @@ impl ProviderClient for OpenRouterClient {
             ],
             "response_format": response_format,
             "reasoning": { "effort": "none", "exclude": true },
-            "plugins": [{ "id": "response-healing" }],
             "max_completion_tokens": route.max_tokens,
             "stream": false
         });
@@ -1379,25 +1378,32 @@ impl ProviderClient for GeminiClient {
     }
 }
 
-fn catalog_response_format(kind: PageKind) -> Result<Value, GenerationError> {
-    let schema = provider_catalog_schema(kind)?;
+fn catalog_response_format(
+    kind: PageKind,
+    strict: bool,
+    keep_prefix_items: bool,
+) -> Result<Value, GenerationError> {
+    let schema = provider_catalog_schema(kind, keep_prefix_items)?;
     Ok(json!({
         "type": "json_schema",
         "json_schema": {
             "name": "glance_page_spec",
-            "strict": true,
+            "strict": strict,
             "schema": schema,
         }
     }))
 }
 
-fn provider_catalog_schema(kind: PageKind) -> Result<Value, GenerationError> {
+fn provider_catalog_schema(
+    kind: PageKind,
+    keep_prefix_items: bool,
+) -> Result<Value, GenerationError> {
     let mut schema = serde_json::from_str::<Value>(CATALOG_SCHEMA_JSON).map_err(|error| {
         GenerationError::InvalidSpec {
             message: format!("catalog schema is invalid JSON: {error}"),
         }
     })?;
-    sanitize_schema_for_provider(&mut schema);
+    sanitize_schema_for_provider(&mut schema, keep_prefix_items);
     if !matches!(kind, PageKind::Root | PageKind::CrossCutting) {
         if let Some(hero_properties) = schema
             .pointer_mut("/$defs/hero/properties")
@@ -1409,13 +1415,16 @@ fn provider_catalog_schema(kind: PageKind) -> Result<Value, GenerationError> {
     Ok(schema)
 }
 
-fn sanitize_schema_for_provider(value: &mut Value) {
+fn sanitize_schema_for_provider(value: &mut Value, keep_prefix_items: bool) {
     match value {
         Value::Object(map) => {
             map.remove("$schema");
             map.remove("$id");
             if map.get("title").is_some_and(Value::is_string) {
                 map.remove("title");
+            }
+            if !keep_prefix_items {
+                map.remove("prefixItems");
             }
             map.remove("contains");
             map.remove("minItems");
@@ -1442,12 +1451,12 @@ fn sanitize_schema_for_provider(value: &mut Value) {
             }
 
             for child in map.values_mut() {
-                sanitize_schema_for_provider(child);
+                sanitize_schema_for_provider(child, keep_prefix_items);
             }
         }
         Value::Array(items) => {
             for item in items {
-                sanitize_schema_for_provider(item);
+                sanitize_schema_for_provider(item, keep_prefix_items);
             }
         }
         _ => {}
@@ -1721,7 +1730,7 @@ mod tests {
         );
         assert_eq!(request.body["reasoning"]["effort"], "none");
         assert_eq!(request.body["reasoning"]["exclude"], true);
-        assert_eq!(request.body["plugins"][0]["id"], "response-healing");
+        assert!(request.body["plugins"].is_null());
         assert_eq!(request.body["stream"], false);
     }
 
@@ -1770,7 +1779,6 @@ mod tests {
         assert!(request.contains("\"name\":\"glance_page_spec\""));
         assert!(request.contains("\"strict\":true"));
         assert!(request.contains("\"reasoning\":{\"effort\":\"none\",\"exclude\":true}"));
-        assert!(request.contains("\"plugins\":[{\"id\":\"response-healing\"}]"));
     }
 
     #[test]

@@ -35,6 +35,7 @@ immediately.
   Never recall directories from memory.
 - File rows include exact `signatures[]` from the File signatures block. Dir
   rows use empty `signatures`.
+- Every `file_table` row includes `name`, `kind`, `role`, and `signatures`.
 - Each `role` is one clause, 12 words or fewer.
 - Use `callouts` for seams, invariants, contracts, and hurt-you edges. Its
   shape is always `{ "type": "callouts", "items": [...] }`; never put `kind`,

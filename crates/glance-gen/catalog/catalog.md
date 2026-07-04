@@ -32,7 +32,8 @@ Components:
   nodes.
 - `flow_diagram`: `nodes`, `edges`, optional `lanes`; Rust draws animated SVG.
 - `file_table`: enhanced file tree rows with `name`, `kind`, `role`,
-  `signatures`, optional `gotcha`, optional `cite`.
+  `signatures`, optional `gotcha`, optional `cite`. Every row includes
+  `kind` and `signatures`; directories use an empty signature array.
 - `callouts`: `kind` of `seam`, `hurt`, `invariant`, or `contract`; each item
   has `title` and inline-node `body`.
 - `disclosure`: collapsed `heading` with child components for full context.
