@@ -384,6 +384,7 @@ dependencies = [
 name = "glance-check"
 version = "0.1.0"
 dependencies = [
+ "glance-core",
  "scraper",
  "tempfile",
  "thiserror",
@@ -402,6 +403,8 @@ dependencies = [
 name = "glance-gen"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "glance-check",
  "glance-core",
  "scraper",
  "serde",

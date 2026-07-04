@@ -1,5 +1,5 @@
 ---
-prompt_version: glance-005-leaf-v3
+prompt_version: glance-006-leaf-v1
 tier: leaf
 ---
 # Mission
@@ -18,6 +18,23 @@ and where the sharp edges are.
 # Context Packet
 
 {{context_packet}}
+
+# Navigation Contract
+
+The context packet includes a `Navigation` section with repo name, own path,
+parent path, breadcrumb coordinates, ordered sibling directories, and the exact
+relative hrefs to use. Every page must include a visible
+`<nav class="glance-nav">` in the header. It must contain:
+
+- `.glance-breadcrumb`: root -> ... -> current page. Link every ancestor with
+  the exact href from the Navigation packet.
+- A parent link using the exact parent href.
+- `.glance-nav-siblings`: either a compact sibling row or prev/next sibling
+  links using the exact sibling hrefs.
+
+Leaf pages have no children; say so in composition. Put
+`data-glance-directory` on the `.glance-page` body or shell. Relative links are
+machine-checked.
 
 # Architecture, Not Inventory
 
@@ -84,12 +101,36 @@ Composition must say that there are no child directories for a leaf. The
 hurt-you section may say "nothing sharp found" only when the evidence genuinely
 shows no sharp edge.
 
+# Visual Register
+
+Start from a calm, dense reference-documentation register: restrained neutral
+palette plus one accent color, monospace citation badges on factual claims,
+generous section rhythm, and real tables or definition lists instead of prose
+walls for structured facts.
+
+Leaf pages are usually the quietest pages, but they should still lean into the
+medium when the local file shape warrants it. Use compact visual hierarchy,
+small cited fact tables, and one purposeful SVG diagram only when it clarifies
+a local contract or flow that prose would obscure. Do not invent actors beyond
+what the local files, parent chain, and sibling names support.
+
+# Theme Contract
+
+Light, dark, and system theming are required on every page. Implement them with
+CSS custom properties only: define tokens in a light `:root` block; mirror
+every token inside both `@media (prefers-color-scheme: dark)` and
+`[data-theme="dark"]`; provide `[data-theme="light"]` overrides. Add a tiny
+three-way light/dark/auto control using `localStorage`, where auto clears the
+stored choice. Never hardcode colors, borders, shadows, or diagram lines
+outside the token set.
+
 # Earned Extras
 
-Default to no diagram and no interactive. At most one inline SVG diagram is
-allowed, and only when shape carries meaning prose cannot. At most one small
-self-contained interactive is allowed, and only when operating it teaches
-behavior. Decorative widgets are forbidden.
+CSS/SVG animation is encouraged only when it carries meaning and must respect
+`prefers-reduced-motion`. Interactives are allowed only where behavior carries
+meaning. Decorative widgets are forbidden. Leaf pages should not request
+generated images unless a local architectural shape is genuinely easier to
+understand as an illustration; most leaves should not request one.
 
 # Voice
 

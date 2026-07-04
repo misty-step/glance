@@ -21,11 +21,21 @@ fn leaf_context_contains_only_leaf_inputs() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-005-leaf-v3");
+    assert_eq!(context.prompt_version, "glance-006-leaf-v1");
     assert!(context.prompt.contains("## Repository"));
     assert!(context.prompt.contains("- source_sha: fixture-sha"));
     assert!(context.prompt.contains("- directory: docs"));
     assert!(context.prompt.contains("- kind: leaf"));
+    assert!(context.prompt.contains("## Navigation"));
+    assert!(context.prompt.contains("- repo_name: mini-source"));
+    assert!(context.prompt.contains("- own_path: docs"));
+    assert!(context.prompt.contains("- parent: . href=../index.html"));
+    assert!(
+        context
+            .prompt
+            .contains("- sibling: src href=../src/index.html")
+    );
+    assert!(context.prompt.contains("- child_dirs: none"));
     assert!(context.prompt.contains("## Local file contents"));
     assert!(context.prompt.contains("### docs/guide.md"));
     assert!(context.prompt.contains("1 | # Guide"));
@@ -61,7 +71,20 @@ fn interior_context_distills_generated_children_and_parent_chain() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-005-interior-v3");
+    assert_eq!(context.prompt_version, "glance-006-interior-v1");
+    assert!(context.prompt.contains("## Navigation"));
+    assert!(context.prompt.contains("- own_path: src"));
+    assert!(context.prompt.contains("- parent: . href=../index.html"));
+    assert!(
+        context
+            .prompt
+            .contains("- child: src/parser href=parser/index.html")
+    );
+    assert!(
+        context
+            .prompt
+            .contains("- sibling: docs href=../docs/index.html")
+    );
     assert!(context.prompt.contains("### src/lib.rs"));
     assert!(context.prompt.contains("## Child pages"));
     assert!(context.prompt.contains("- directory: src/parser"));
@@ -132,7 +155,16 @@ fn root_context_uses_repo_metadata_and_all_child_pages() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-005-root-v3");
+    assert_eq!(context.prompt_version, "glance-006-root-v1");
+    assert!(context.prompt.contains("## Navigation"));
+    assert!(context.prompt.contains("- own_path: ."));
+    assert!(context.prompt.contains("- parent: none"));
+    assert!(
+        context
+            .prompt
+            .contains("- child: docs href=docs/index.html")
+    );
+    assert!(context.prompt.contains("- child: src href=src/index.html"));
     assert!(context.prompt.contains("## Root metadata"));
     assert!(context.prompt.contains("### README.md"));
     assert!(context.prompt.contains("manifest files: none"));

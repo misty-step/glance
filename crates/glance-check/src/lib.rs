@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use glance_core::{DirectorySnapshot, snapshot_tree};
 use scraper::{Html, Selector};
 use thiserror::Error;
 
@@ -124,14 +125,21 @@ pub struct CitationFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavigationFailure {
+    pub directory: PathBuf,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckReport {
     pub citations_checked: usize,
     pub failures: Vec<CitationFailure>,
+    pub navigation_failures: Vec<NavigationFailure>,
 }
 
 impl CheckReport {
     pub fn is_ok(&self) -> bool {
-        self.failures.is_empty()
+        self.failures.is_empty() && self.navigation_failures.is_empty()
     }
 }
 
@@ -163,6 +171,7 @@ impl CitationChecker {
                         },
                         message: error.to_string(),
                     }],
+                    navigation_failures: Vec::new(),
                 };
             }
         };
@@ -176,10 +185,12 @@ impl CitationChecker {
                 });
             }
         }
+        let navigation_failures = self.check_navigation(html);
 
         CheckReport {
             citations_checked: citations.len(),
             failures,
+            navigation_failures,
         }
     }
 
@@ -190,6 +201,19 @@ impl CitationChecker {
             source,
         })?;
         Ok(self.check_html(&html))
+    }
+
+    fn check_navigation(&self, html: &str) -> Vec<NavigationFailure> {
+        let snapshot = match snapshot_tree(&self.source_root, self.source_sha.clone()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return vec![NavigationFailure {
+                    directory: PathBuf::from("<source>"),
+                    message: format!("source snapshot failed: {error}"),
+                }];
+            }
+        };
+        validate_navigation(html, &snapshot)
     }
 
     fn verify_citation(&self, citation: &Citation) -> std::result::Result<(), String> {
@@ -245,6 +269,240 @@ impl CitationChecker {
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
+}
+
+pub fn validate_navigation(html: &str, snapshot: &DirectorySnapshot) -> Vec<NavigationFailure> {
+    let document = Html::parse_document(html);
+    let directory = match page_directory(&document) {
+        Ok(directory) => directory,
+        Err(message) => {
+            return vec![NavigationFailure {
+                directory: PathBuf::from("<html>"),
+                message,
+            }];
+        }
+    };
+
+    let mut failures = Vec::new();
+    let Some(record) = snapshot.directory(&directory) else {
+        return vec![NavigationFailure {
+            directory,
+            message: "data-glance-directory does not exist in source snapshot".to_owned(),
+        }];
+    };
+
+    let hrefs = page_hrefs(&document);
+    if directory != Path::new(".") {
+        let parent = parent_directory(&directory);
+        if !hrefs
+            .iter()
+            .any(|href| href_targets_directory(href, &directory, &parent))
+        {
+            failures.push(NavigationFailure {
+                directory: directory.clone(),
+                message: format!(
+                    "missing parent link {}",
+                    directory_href(&directory, &parent)
+                ),
+            });
+        }
+    }
+
+    for child in &record.child_dirs {
+        if !hrefs
+            .iter()
+            .any(|href| href_targets_directory(href, &directory, child))
+        {
+            failures.push(NavigationFailure {
+                directory: directory.clone(),
+                message: format!(
+                    "missing child link {} href={}",
+                    path_label(child),
+                    directory_href(&directory, child)
+                ),
+            });
+        }
+    }
+
+    failures
+}
+
+fn page_directory(document: &Html) -> std::result::Result<PathBuf, String> {
+    let selector = Selector::parse("[data-glance-directory]").map_err(|error| error.to_string())?;
+    let Some(element) = document.select(&selector).next() else {
+        return Err("missing data-glance-directory".to_owned());
+    };
+    let raw = element
+        .value()
+        .attr("data-glance-directory")
+        .unwrap_or_default()
+        .trim();
+    if raw.is_empty() {
+        return Err("empty data-glance-directory".to_owned());
+    }
+    if raw == "." {
+        return Ok(PathBuf::from("."));
+    }
+    validate_relative_path(Path::new(raw))
+}
+
+fn page_hrefs(document: &Html) -> Vec<String> {
+    let selector = match Selector::parse("a[href]") {
+        Ok(selector) => selector,
+        Err(_) => return Vec::new(),
+    };
+    document
+        .select(&selector)
+        .filter_map(|element| element.value().attr("href"))
+        .map(str::to_owned)
+        .collect()
+}
+
+pub fn directory_href(current: &Path, target: &Path) -> String {
+    let current_dir = site_directory(current);
+    let target_file = site_index_file(target);
+    let relative = relative_path_between(&current_dir, &target_file);
+    if relative.as_os_str().is_empty() {
+        "index.html".to_owned()
+    } else {
+        href_label(&relative)
+    }
+}
+
+fn href_targets_directory(href: &str, current: &Path, target: &Path) -> bool {
+    let Some(path) = href_path(href) else {
+        return false;
+    };
+    let current_dir = site_directory(current);
+    let resolved = normalize_site_path(&current_dir.join(path));
+    resolved
+        .as_ref()
+        .is_some_and(|path| path == &site_index_file(target))
+}
+
+fn href_path(href: &str) -> Option<PathBuf> {
+    let href = href
+        .split('#')
+        .next()
+        .unwrap_or(href)
+        .split('?')
+        .next()
+        .unwrap_or(href)
+        .trim();
+    if href.is_empty()
+        || href.starts_with('#')
+        || href.starts_with('/')
+        || href.contains("://")
+        || href.starts_with("mailto:")
+    {
+        return None;
+    }
+    let mut path = PathBuf::from(href);
+    if href.ends_with('/') || path.extension().is_none() {
+        path.push("index.html");
+    }
+    Some(path)
+}
+
+fn parent_directory(directory: &Path) -> PathBuf {
+    directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn site_directory(directory: &Path) -> PathBuf {
+    if directory == Path::new(".") {
+        PathBuf::new()
+    } else {
+        directory.to_path_buf()
+    }
+}
+
+fn site_index_file(directory: &Path) -> PathBuf {
+    if directory == Path::new(".") {
+        PathBuf::from("index.html")
+    } else {
+        directory.join("index.html")
+    }
+}
+
+fn relative_path_between(from_dir: &Path, to_file: &Path) -> PathBuf {
+    let from_parts = normal_components(from_dir);
+    let to_parts = normal_components(to_file);
+    let mut common = 0;
+    while common < from_parts.len()
+        && common < to_parts.len()
+        && from_parts[common] == to_parts[common]
+    {
+        common += 1;
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in common..from_parts.len() {
+        relative.push("..");
+    }
+    for part in &to_parts[common..] {
+        relative.push(part);
+    }
+    relative
+}
+
+fn normalize_site_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        Some(PathBuf::from("index.html"))
+    } else {
+        Some(normalized)
+    }
+}
+
+fn normal_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn path_label(path: &Path) -> String {
+    if path == Path::new(".") {
+        ".".to_owned()
+    } else {
+        path.components()
+            .filter_map(|component| match component {
+                Component::Normal(part) => Some(part.to_string_lossy()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
+fn href_label(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            Component::ParentDir => Some("..".to_owned()),
+            Component::CurDir => Some(".".to_owned()),
+            Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn parse_line(raw: &str, value: &str) -> Result<usize, CheckError> {

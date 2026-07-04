@@ -2,6 +2,10 @@
 
 Status: deferred
 
+Operator reconfirmed on 2026-07-04: the Q&A face is still wanted eventually,
+but remains deferred/backlog and must not ship as part of the page-quality
+mandate.
+
 ## Goal
 
 Capture, but do not implement yet, an embedded Q&A face over the generated

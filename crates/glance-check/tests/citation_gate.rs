@@ -79,12 +79,63 @@ fn accepts_pages_whose_citations_exist_at_pinned_sha() {
 
     assert!(report.is_ok(), "{report:#?}");
     assert_eq!(report.citations_checked, 2);
+    assert!(report.navigation_failures.is_empty());
+}
+
+#[test]
+fn accepts_generated_pages_with_required_navigation_links() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory=".">
+<nav class="glance-nav"><a href="src/index.html">src</a></nav>
+<p data-glance-cite="README.md:1-3">fixture root</p>
+</body></html>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+
+    assert!(report.is_ok(), "{report:#?}");
+    assert_eq!(report.citations_checked, 1);
+}
+
+#[test]
+fn rejects_generated_pages_missing_parent_navigation() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="src">
+<p data-glance-cite="src/lib.rs:1-3">fixture source</p>
+</body></html>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+
+    assert!(!report.is_ok());
+    assert!(
+        report
+            .navigation_failures
+            .iter()
+            .any(|failure| failure.message.contains("parent link"))
+    );
+}
+
+#[test]
+fn rejects_generated_pages_missing_child_navigation() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory=".">
+<p data-glance-cite="README.md:1-3">fixture root</p>
+</body></html>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+
+    assert!(!report.is_ok());
+    assert!(
+        report
+            .navigation_failures
+            .iter()
+            .any(|failure| failure.message.contains("child link src"))
+    );
 }
 
 #[test]
 fn checks_each_range_from_one_path_multi_range_citation() {
     let (repo, sha) = committed_source_repo();
-    let html = r#"<!doctype html><p data-glance-cite="src/lib.rs:1-2,3-3">split ranges</p>"#;
+    let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"><a href="src/index.html">src</a></nav><p data-glance-cite="src/lib.rs:1-2,3-3">split ranges</p></body></html>"#;
 
     let report = CitationChecker::new(repo.path(), sha).check_html(html);
 
@@ -95,8 +146,7 @@ fn checks_each_range_from_one_path_multi_range_citation() {
 #[test]
 fn checks_each_range_from_multi_path_citation() {
     let (repo, sha) = committed_source_repo();
-    let html =
-        r#"<!doctype html><p data-glance-cite="src/lib.rs:1-2,3-3,README.md:1">split paths</p>"#;
+    let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"><a href="src/index.html">src</a></nav><p data-glance-cite="src/lib.rs:1-2,3-3,README.md:1">split paths</p></body></html>"#;
 
     let report = CitationChecker::new(repo.path(), sha).check_html(html);
 
