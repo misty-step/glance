@@ -71,10 +71,11 @@ fn snapshot_delta_is_limited_to_changed_ancestor_path() {
 }
 
 #[test]
-fn default_walk_options_exclude_git_and_target_directories() {
+fn default_walk_options_exclude_generated_and_build_directories() {
     let options = WalkOptions::default();
     assert!(options.ignores_dir_name(".git"));
     assert!(options.ignores_dir_name("target"));
+    assert!(options.ignores_dir_name("glance-site-out"));
     assert!(options.ignores_relative_dir(Path::new("tests/fixtures/live-sample")));
 }
 
