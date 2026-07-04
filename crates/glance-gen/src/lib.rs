@@ -1201,10 +1201,10 @@ impl ProviderClient for OpenRouterClient {
         route: &ModelRoute,
         kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
-        let response_format = if kind == PageKind::Leaf {
-            catalog_response_format(kind, true, true)?
-        } else {
-            catalog_response_format(kind, false, false)?
+        let response_format = match kind {
+            PageKind::Leaf => catalog_response_format(kind, true, true)?,
+            PageKind::Root | PageKind::CrossCutting => catalog_response_format(kind, false, false)?,
+            PageKind::Interior => json!({ "type": "json_object" }),
         };
         let body = json!({
             "model": route.model,
