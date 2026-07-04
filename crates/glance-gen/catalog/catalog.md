@@ -36,6 +36,7 @@ Components:
 - `callouts`: `kind` of `seam`, `hurt`, `invariant`, or `contract`; each item
   has `title` and inline-node `body`.
 - `disclosure`: collapsed `heading` with child components for full context.
+  Children may not be `hero` or nested `disclosure`.
 - `image_figure`: structured `image_request`; never a raw URL.
 - `custom_html`: one earned, bounded interactive for interior/root pages only.
   Declare any citations inside `citations` so deterministic checking can still
@@ -50,3 +51,35 @@ Inline nodes:
 Citation text must read as prose. Never write visible bracket citations such as
 `[src/lib.rs:1-4]`; the renderer turns cite nodes into subtle source links and
 popovers.
+
+Important object shapes:
+
+```json
+{
+  "type": "callouts",
+  "items": [
+    {
+      "kind": "hurt",
+      "title": "What can hurt you",
+      "body": [{ "type": "text", "text": "Plain prose." }]
+    }
+  ]
+}
+```
+
+Never put `kind`, `title`, or `body` directly on the `callouts` component; they
+belong inside `items[]`.
+
+```json
+{
+  "type": "file_table",
+  "rows": [
+    {
+      "name": "src/lib.rs",
+      "kind": "file",
+      "role": "Exports the crate API.",
+      "signatures": ["pub fn render() -> Result<()>"]
+    }
+  ]
+}
+```

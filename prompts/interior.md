@@ -31,7 +31,12 @@ jargon unless you gloss them immediately.
   link to child pages by name; file rows include exact `signatures[]` from the
   File signatures block.
 - Each `role` is one clause, 12 words or fewer.
-- Use `callouts` for seams, invariants, contracts, and hurt-you edges.
+- Use `callouts` for seams, invariants, contracts, and hurt-you edges. Its
+  shape is always `{ "type": "callouts", "items": [...] }`; never put `kind`,
+  `title`, or `body` directly on the component.
+- `disclosure.children` may contain narrative, callouts, flow, file_table,
+  image_figure, or custom_html only; never put `hero` or nested `disclosure`
+  inside a disclosure.
 - `custom_html` is allowed only for an earned interactive miniature. Default to
   no custom HTML.
 

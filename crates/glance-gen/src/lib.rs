@@ -1182,6 +1182,7 @@ impl ProviderClient for OpenRouterClient {
         prompt: &PromptContext,
         route: &ModelRoute,
     ) -> Result<ProviderOutput, GenerationError> {
+        let response_format = catalog_response_format()?;
         let body = json!({
             "model": route.model,
             "messages": [
@@ -1194,7 +1195,8 @@ impl ProviderClient for OpenRouterClient {
                     "content": prompt.prompt
                 }
             ],
-            "response_format": { "type": "json_object" },
+            "response_format": response_format,
+            "reasoning": { "effort": "none", "exclude": true },
             "max_completion_tokens": route.max_tokens,
             "stream": false
         });
@@ -1350,6 +1352,22 @@ impl ProviderClient for GeminiClient {
             finish_reason,
         })
     }
+}
+
+fn catalog_response_format() -> Result<Value, GenerationError> {
+    let schema = serde_json::from_str::<Value>(CATALOG_SCHEMA_JSON).map_err(|error| {
+        GenerationError::InvalidSpec {
+            message: format!("catalog schema is invalid JSON: {error}"),
+        }
+    })?;
+    Ok(json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "glance_page_spec",
+            "strict": true,
+            "schema": schema,
+        }
+    }))
 }
 
 fn provider_http_error(provider: &'static str, status: u16, body: String) -> GenerationError {
@@ -1588,7 +1606,21 @@ mod tests {
         assert_eq!(request.headers["Authorization"], "Bearer secret-key");
         assert_eq!(request.body["model"], "deepseek/deepseek-v4-flash");
         assert_eq!(request.body["max_completion_tokens"], 6_000);
-        assert_eq!(request.body["response_format"]["type"], "json_object");
+        assert_eq!(request.body["response_format"]["type"], "json_schema");
+        assert_eq!(
+            request.body["response_format"]["json_schema"]["name"],
+            "glance_page_spec"
+        );
+        assert_eq!(
+            request.body["response_format"]["json_schema"]["strict"],
+            true
+        );
+        assert_eq!(
+            request.body["response_format"]["json_schema"]["schema"]["$id"],
+            "https://misty-step.dev/glance/catalog/glance-catalog-001.schema.json"
+        );
+        assert_eq!(request.body["reasoning"]["effort"], "none");
+        assert_eq!(request.body["reasoning"]["exclude"], true);
         assert_eq!(request.body["stream"], false);
     }
 
@@ -1632,7 +1664,10 @@ mod tests {
         assert!(request_lower.contains("authorization: bearer server-key"));
         assert!(request.contains("\"max_completion_tokens\":6000"));
         assert!(request.contains("\"model\":\"deepseek/deepseek-v4-flash\""));
-        assert!(request.contains("\"response_format\":{\"type\":\"json_object\"}"));
+        assert!(request.contains("\"response_format\":{\"json_schema\""));
+        assert!(request.contains("\"name\":\"glance_page_spec\""));
+        assert!(request.contains("\"strict\":true"));
+        assert!(request.contains("\"reasoning\":{\"effort\":\"none\",\"exclude\":true}"));
     }
 
     #[test]
@@ -2339,12 +2374,20 @@ mod tests {
             return;
         }
 
-        let root = PathBuf::from("crates/glance-core/tests/fixtures/mini-source");
-        let root = if root.exists() {
-            root
+        let default_root = PathBuf::from("crates/glance-core/tests/fixtures/mini-source");
+        let default_root = if default_root.exists() {
+            default_root
         } else {
             PathBuf::from("../glance-core/tests/fixtures/mini-source")
         };
+        let root = std::env::var_os("GLANCE_LIVE_SMOKE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or(default_root);
+        let directory = std::env::var_os("GLANCE_LIVE_SMOKE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("src/parser"));
+        let source_sha =
+            std::env::var("GLANCE_LIVE_SMOKE_SHA").unwrap_or_else(|_| "live-smoke".to_owned());
         let mut config = GenerationConfig {
             provider_mode: ProviderMode::Real,
             ..GenerationConfig::default()
@@ -2357,14 +2400,17 @@ mod tests {
         }
         config.budget.per_run_micros = Some(50_000);
         config.budget.per_day_micros = Some(50_000);
-        config.prompt.max_file_bytes = 4096;
+        config.prompt.max_file_bytes = std::env::var("GLANCE_LIVE_SMOKE_MAX_FILE_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(4096);
         let generator = RealPageGenerator::from_env(config).expect("real generator");
 
         let page = generator
             .generate(GenerationRequest::new(
                 root.clone(),
-                PathBuf::from("src/parser"),
-                "live-smoke".to_owned(),
+                directory,
+                source_sha,
                 PageKind::Leaf,
             ))
             .expect("live page");

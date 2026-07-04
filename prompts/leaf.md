@@ -25,6 +25,11 @@ jargon unless you gloss them immediately.
 
 - `hero` first, then `narrative`, then optional `callouts`, then exactly one
   `file_table`, then final `disclosure` context.
+- `callouts` is always `{ "type": "callouts", "items": [...] }`; never put
+  `kind`, `title`, or `body` directly on the component.
+- `disclosure.children` may contain narrative, callouts, flow, file_table,
+  image_figure, or custom_html only; never put `hero` or nested `disclosure`
+  inside a disclosure.
 - Leaf pages never request images and never use `custom_html`.
 - `file_table.rows` covers local files. Leaf directories have no child
   directories; if the context says empty, say so plainly and do not invent

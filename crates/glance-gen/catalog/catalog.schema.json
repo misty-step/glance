@@ -202,7 +202,7 @@
       "properties": {
         "type": { "const": "disclosure" },
         "heading": { "type": "string", "minLength": 1 },
-        "children": { "type": "array", "items": { "$ref": "#/$defs/component" } }
+        "children": { "type": "array", "items": { "$ref": "#/$defs/disclosure_child" } }
       }
     },
     "image_figure": {
@@ -233,6 +233,16 @@
         { "$ref": "#/$defs/file_table" },
         { "$ref": "#/$defs/callouts" },
         { "$ref": "#/$defs/disclosure" },
+        { "$ref": "#/$defs/image_figure" },
+        { "$ref": "#/$defs/custom_html" }
+      ]
+    },
+    "disclosure_child": {
+      "oneOf": [
+        { "$ref": "#/$defs/narrative" },
+        { "$ref": "#/$defs/flow_diagram" },
+        { "$ref": "#/$defs/file_table" },
+        { "$ref": "#/$defs/callouts" },
         { "$ref": "#/$defs/image_figure" },
         { "$ref": "#/$defs/custom_html" }
       ]
