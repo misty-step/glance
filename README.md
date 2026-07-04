@@ -10,7 +10,8 @@ This founding slice intentionally ships only the deterministic core:
 - `glance-check`: deterministic citation checking for generated HTML.
 - `glance-publish`: sister-repo publishing for generated HTML and metadata.
 - `glance-gen`: tier-routed generation providers, fallback policy, budget
-  enforcement, spend reporting, and the mock provider used by deterministic
+  enforcement, spend reporting, deterministic navigation validation, the
+  budgeted image-request pipeline, and the mock provider used by deterministic
   local smoke runs.
 - `glance`: CLI entrypoint for `run`, `plan`, `check`, `publish`, and
   `serve-local`.
@@ -36,6 +37,29 @@ exponential backoff, and jitter; inner provider clients make one HTTP attempt.
 Budgets are hard caps in cost micros. A run fails before a provider call if the
 estimated page would exceed `per_run_micros` or `per_day_micros`. Each run emits
 a spend report with input tokens, output tokens, and estimated cost per page.
+
+## Navigation and images
+
+Every generated page carries `data-glance-directory` and a `.glance-nav` header
+with breadcrumb, parent, child, and sibling links assembled from the source tree.
+`glance check` validates citations and the structural parent/child navigation
+spine deterministically.
+
+Generated HTML may request images with:
+
+```html
+<figure
+  data-glance-image-prompt="Create a cited architecture illustration..."
+  data-glance-image-alt="Architecture illustration">
+</figure>
+```
+
+When a run writes a site directory, `glance-gen` renders up to
+`generation.image.budget_per_run` requests beside their pages. Mock runs write a
+deterministic PNG. Real runs use Gemini image generation via `GEMINI_API_KEY`
+and the Interactions API endpoint configured in `generation.image`, defaulting
+to `gemini-3.1-flash-lite-image`. Render failure keeps a styled fallback figure
+with alt text and never emits a broken `<img>`.
 
 ## Gate
 

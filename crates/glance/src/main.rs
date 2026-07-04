@@ -8,9 +8,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use glance_check::CitationChecker;
 use glance_core::{RegenerationPlan, SourcePin, leaf_to_root_dirs, snapshot_tree};
 use glance_gen::{
-    GeneratedPage, GenerationConfig, GenerationRequest, MockProvider, PageGenerator, PageKind,
-    PageSpend, ProviderMode, RealPageGenerator, SpendReport, assemble_prompt_context_with_degraded,
-    normalize_generated_html_citations, spend_report_lines,
+    GeminiImageProvider, GeneratedPage, GenerationConfig, GenerationRequest, ImageBudget,
+    ImageOutput, ImageProvider, ImageProviderKind, ImageRequest, MockImageProvider, MockProvider,
+    PageGenerator, PageKind, PageSpend, ProviderMode, RealPageGenerator, SpendReport,
+    assemble_prompt_context_with_degraded, normalize_generated_html_citations,
+    render_image_requests, spend_report_lines,
 };
 use glance_publish::{GhSisterHost, PublishRequest, SourceRepo};
 use serde::Deserialize;
@@ -175,10 +177,12 @@ fn run_command(
     let generation = config.generation.clone();
     let routing = generation.routing.clone();
     let prompt = generation.prompt.clone();
+    let image = generation.image.clone();
     let provider: Box<dyn PageGenerator> = match generation.provider_mode {
         ProviderMode::Mock => Box::new(MockProvider::with_routing(routing.clone())),
         ProviderMode::Real => Box::new(RealPageGenerator::from_env(generation)?),
     };
+    let image_provider = image_provider_for(&config.generation);
     let existing_pages = match &site_root {
         Some(site_root) if site_root.exists() => load_existing_generated_pages(site_root)?,
         _ => BTreeMap::new(),
@@ -186,15 +190,17 @@ fn run_command(
 
     println!("source_sha={source_sha}");
     println!("directories={}", snapshot.directories.len());
-    let outcome = run_generation(
-        &snapshot,
-        &source_sha,
-        site_root.as_deref(),
-        &routing,
-        &prompt,
-        provider.as_ref(),
-        &existing_pages,
-    )?;
+    let outcome = run_generation(RunGenerationInput {
+        snapshot: &snapshot,
+        source_sha: &source_sha,
+        site_root: site_root.as_deref(),
+        routing: &routing,
+        prompt: &prompt,
+        image: &image,
+        provider: provider.as_ref(),
+        image_provider: image_provider.as_ref(),
+        existing_pages: &existing_pages,
+    })?;
 
     for line in spend_report_lines(&outcome.spend_report) {
         println!("{line}");
@@ -222,19 +228,35 @@ struct RunOutcome {
     failures: Vec<RunFailure>,
 }
 
-fn run_generation(
-    snapshot: &glance_core::DirectorySnapshot,
-    source_sha: &str,
-    site_root: Option<&Path>,
-    routing: &glance_gen::DepthRouting,
-    prompt: &glance_gen::PromptConfig,
-    provider: &dyn PageGenerator,
-    existing_pages: &BTreeMap<PathBuf, String>,
-) -> Result<RunOutcome> {
+struct RunGenerationInput<'a> {
+    snapshot: &'a glance_core::DirectorySnapshot,
+    source_sha: &'a str,
+    site_root: Option<&'a Path>,
+    routing: &'a glance_gen::DepthRouting,
+    prompt: &'a glance_gen::PromptConfig,
+    image: &'a glance_gen::ImageConfig,
+    provider: &'a dyn PageGenerator,
+    image_provider: &'a dyn ImageProvider,
+    existing_pages: &'a BTreeMap<PathBuf, String>,
+}
+
+fn run_generation(input: RunGenerationInput<'_>) -> Result<RunOutcome> {
+    let RunGenerationInput {
+        snapshot,
+        source_sha,
+        site_root,
+        routing,
+        prompt,
+        image,
+        provider,
+        image_provider,
+        existing_pages,
+    } = input;
     let mut spend_report = SpendReport::default();
     let mut generated_pages = BTreeMap::new();
     let mut degraded_pages = BTreeSet::new();
     let mut failures = Vec::new();
+    let mut image_budget = ImageBudget::new(image.budget_per_run);
 
     for directory in leaf_to_root_dirs(snapshot.directories.keys().cloned()) {
         let kind = if directory == Path::new(".") {
@@ -309,6 +331,29 @@ fn run_generation(
             println!("metadata_note={} {}", directory.display(), note);
         }
         if let Some(site_root) = site_root {
+            let output_dir = page_output_dir(site_root, &directory);
+            let image_report = render_image_requests(
+                &page.html,
+                &output_dir,
+                image,
+                image_provider,
+                &mut image_budget,
+            );
+            page.html = image_report.html;
+            if image_report.requested > 0 {
+                println!(
+                    "image_report={} requested={} rendered={} failed={} skipped={} remaining_budget={}",
+                    directory.display(),
+                    image_report.requested,
+                    image_report.rendered,
+                    image_report.failed,
+                    image_report.skipped,
+                    image_budget.remaining()
+                );
+                for message in image_report.messages {
+                    println!("image_note={} {}", directory.display(), message);
+                }
+            }
             if let Err(error) = write_generated_page(site_root, &directory, source_sha, kind, &page)
             {
                 record_run_failure(&mut degraded_pages, &mut failures, &directory, error);
@@ -339,6 +384,41 @@ fn run_generation(
         spend_report,
         failures,
     })
+}
+
+fn image_provider_for(generation: &GenerationConfig) -> Box<dyn ImageProvider> {
+    if generation.provider_mode == ProviderMode::Mock {
+        return Box::new(MockImageProvider);
+    }
+    match generation.image.provider {
+        ImageProviderKind::Mock => Box::new(MockImageProvider),
+        ImageProviderKind::Gemini => match GeminiImageProvider::from_env(&generation.image) {
+            Ok(provider) => Box::new(provider),
+            Err(error) => Box::new(DisabledImageProvider {
+                message: error.to_string(),
+            }),
+        },
+        ImageProviderKind::GptImage2 => Box::new(DisabledImageProvider {
+            message: "gpt-image-2 image provider is not implemented yet".to_owned(),
+        }),
+    }
+}
+
+struct DisabledImageProvider {
+    message: String,
+}
+
+impl ImageProvider for DisabledImageProvider {
+    fn render(
+        &self,
+        _request: &ImageRequest,
+    ) -> std::result::Result<ImageOutput, glance_gen::GenerationError> {
+        Err(glance_gen::GenerationError::Provider {
+            provider: "image",
+            retryable: false,
+            message: self.message.clone(),
+        })
+    }
 }
 
 fn record_run_failure<E: std::fmt::Display>(
@@ -849,15 +929,18 @@ mod tests {
         };
         let existing_pages = BTreeMap::new();
 
-        let outcome = run_generation(
-            &snapshot,
-            "fixture-sha",
-            Some(&site),
-            &GenerationConfig::default().routing,
-            &GenerationConfig::default().prompt,
-            &provider,
-            &existing_pages,
-        )
+        let config = GenerationConfig::default();
+        let outcome = run_generation(RunGenerationInput {
+            snapshot: &snapshot,
+            source_sha: "fixture-sha",
+            site_root: Some(&site),
+            routing: &config.routing,
+            prompt: &config.prompt,
+            image: &config.image,
+            provider: &provider,
+            image_provider: &MockImageProvider,
+            existing_pages: &existing_pages,
+        })
         .expect("run should complete with recorded failure");
 
         assert_eq!(outcome.failures.len(), 1);
@@ -875,6 +958,51 @@ mod tests {
             .parse::<serde_json::Value>()
             .expect("summary json");
         assert_eq!(summary["failed_pages"][0]["directory"], "bad");
+    }
+
+    #[test]
+    fn mock_run_writes_navigation_links_that_resolve_to_generated_pages() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../glance-core/tests/fixtures/mini-source");
+        let snapshot = snapshot_tree(&source, "fixture-sha").expect("snapshot");
+        let site = tempfile::tempdir().expect("site");
+        let config = GenerationConfig::default();
+        let existing_pages = BTreeMap::new();
+
+        let provider = MockProvider::with_routing(config.routing.clone());
+        let outcome = run_generation(RunGenerationInput {
+            snapshot: &snapshot,
+            source_sha: "fixture-sha",
+            site_root: Some(site.path()),
+            routing: &config.routing,
+            prompt: &config.prompt,
+            image: &config.image,
+            provider: &provider,
+            image_provider: &MockImageProvider,
+            existing_pages: &existing_pages,
+        })
+        .expect("mock run");
+
+        assert!(outcome.failures.is_empty(), "{outcome:#?}");
+        let root_html = std::fs::read_to_string(site.path().join("index.html")).expect("root");
+        assert!(root_html.contains(r#"href="docs/index.html""#));
+        assert!(root_html.contains(r#"href="src/index.html""#));
+        assert!(site.path().join("docs/index.html").is_file());
+        assert!(site.path().join("src/index.html").is_file());
+
+        let src_html = std::fs::read_to_string(site.path().join("src/index.html")).expect("src");
+        assert!(src_html.contains(r#"href="../index.html""#));
+        assert!(src_html.contains(r#"href="parser/index.html""#));
+        assert!(site.path().join("src/parser/index.html").is_file());
+
+        let parser_html =
+            std::fs::read_to_string(site.path().join("src/parser/index.html")).expect("parser");
+        assert!(parser_html.contains(r#"href="../index.html""#));
+
+        assert!(root_html.contains("glance-diagram"));
+        assert!(root_html.contains("data-theme-choice=\"auto\""));
+        assert!(root_html.contains(r#"<img src="glance-image-001.png""#));
+        assert!(site.path().join("glance-image-001.png").is_file());
     }
 
     #[cfg(unix)]

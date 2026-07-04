@@ -1,9 +1,7 @@
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::fmt;
-#[cfg(test)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -149,7 +147,12 @@ pub use context::{
     PromptContext, assemble_prompt_context, assemble_prompt_context_with_degraded,
     normalize_generated_html_citations,
 };
+mod images;
 use context::{is_retryable_output_validation, validate_provider_output};
+pub use images::{
+    GeminiImageProvider, ImageBudget, ImageConfig, ImageOutput, ImageProvider, ImageProviderKind,
+    ImageRenderReport, ImageRequest, MockImageProvider, render_image_requests,
+};
 
 #[derive(Debug, Error)]
 pub enum GenerationError {
@@ -212,6 +215,10 @@ impl MockProvider {
 impl PageGenerator for MockProvider {
     fn generate(&self, request: GenerationRequest) -> Result<GeneratedPage, GenerationError> {
         let prompt_context = PromptContext::from_request(&request, 64 * 1024)?;
+        let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
+            .map_err(|error| GenerationError::Context {
+                message: error.to_string(),
+            })?;
         let tier = self.router.tier_for(request.kind);
         let route = self.routing.model_for(request.kind);
         let directory = request.directory.display();
@@ -219,6 +226,20 @@ impl PageGenerator for MockProvider {
         let cited_attr = citation
             .map(|citation| format!(r#" class="glance-cited" data-glance-cite="{citation}""#))
             .unwrap_or_default();
+        let directory_attr = path_label(&request.directory);
+        let nav = mock_navigation(&snapshot, &request.directory);
+        let composition = mock_composition(&snapshot, &request.directory, cited_attr.as_str());
+        let root_extras = if matches!(request.kind, PageKind::Root | PageKind::CrossCutting) {
+            r##"<figure class="glance-image-request" data-glance-image-prompt="Create a clean architectural hero illustration for this repository: source tree rooms becoming linked Glance HTML pages, with citation rails and navigation paths. No decorative clutter." data-glance-image-alt="Architecture illustration of source directories becoming linked Glance pages"></figure>
+<svg class="glance-diagram" viewBox="0 0 420 120" role="img" aria-label="Animated source to page flow">
+  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z"></path></marker></defs>
+  <path d="M40 60 H380" stroke="currentColor" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+  <circle r="7" fill="currentColor"><animateMotion dur="4s" repeatCount="indefinite" path="M40 60 H360"></animateMotion></circle>
+  <text x="36" y="35">source</text><text x="174" y="35">citations</text><text x="318" y="35">site</text>
+</svg>"##
+        } else {
+            ""
+        };
         let cross_cutting = if matches!(request.kind, PageKind::Root | PageKind::CrossCutting) {
             format!(
                 r#"<section class="glance-section glance-cross-cutting" data-glance-section="flows"><h2 class="glance-section-title">Flows</h2><p{cited_attr}>Mock flow across generated context.</p></section>
@@ -230,13 +251,13 @@ impl PageGenerator for MockProvider {
         };
         Ok(GeneratedPage {
             html: format!(
-                r#"<!doctype html><html data-source-sha="{}" data-prompt-version="{}"><head><meta charset="utf-8"><title>Glance {directory}</title></head><body class="glance-page"><header class="glance-header"><h1>{directory}</h1></header><main>
+                r#"<!doctype html><html data-source-sha="{}" data-prompt-version="{}"><head><meta charset="utf-8"><title>Glance {directory}</title><style>:root{{color-scheme:light dark;--glance-bg:#f7f5ef;--glance-text:#171614;--glance-line:#d8d2c4;--glance-accent:#2457d6}}@media (prefers-color-scheme:dark){{:root{{--glance-bg:#111316;--glance-text:#f1efe7;--glance-line:#343941;--glance-accent:#9ab3ff}}}}[data-theme="light"]{{--glance-bg:#f7f5ef;--glance-text:#171614;--glance-line:#d8d2c4;--glance-accent:#2457d6}}[data-theme="dark"]{{--glance-bg:#111316;--glance-text:#f1efe7;--glance-line:#343941;--glance-accent:#9ab3ff}}body{{background:var(--glance-bg);color:var(--glance-text)}}a{{color:var(--glance-accent)}}.glance-image-request{{border:1px solid var(--glance-line);padding:1rem}}</style><script>try{{let t=localStorage.getItem('glance-theme');if(t)document.documentElement.dataset.theme=t}}catch(e){{}}</script></head><body class="glance-page" data-glance-directory="{directory_attr}"><header class="glance-header"><h1>{directory}</h1><div class="glance-theme"><button data-theme-choice="light">light</button><button data-theme-choice="dark">dark</button><button data-theme-choice="auto">auto</button></div>{nav}</header><main>
 <section class="glance-section" data-glance-section="what-this-is"><h2 class="glance-section-title">What this is</h2><p{cited_attr}>Mock glance page for {directory}.</p></section>
 <section class="glance-section" data-glance-section="role-in-the-whole"><h2 class="glance-section-title">Role in the whole</h2><p{cited_attr}>Mock role in the repository.</p></section>
-<section class="glance-section" data-glance-section="composition"><h2 class="glance-section-title">Composition</h2><div class="glance-composition"><p{cited_attr}>Mock composition section.</p></div></section>
+<section class="glance-section" data-glance-section="composition"><h2 class="glance-section-title">Composition</h2><div class="glance-composition">{composition}</div></section>
 <section class="glance-section" data-glance-section="seams-contracts"><h2 class="glance-section-title">Seams and contracts</h2><p{cited_attr}>Mock seam section.</p></section>
 <section class="glance-section" data-glance-section="where-it-can-hurt-you"><h2 class="glance-section-title">Where it can hurt you</h2><p{cited_attr}>Nothing sharp found.</p></section>
-{cross_cutting}</main></body></html>"#,
+{cross_cutting}{root_extras}</main><script>document.querySelectorAll('[data-theme-choice]').forEach((button)=>button.addEventListener('click',()=>{{let value=button.dataset.themeChoice;if(value==='auto'){{localStorage.removeItem('glance-theme');delete document.documentElement.dataset.theme}}else{{localStorage.setItem('glance-theme',value);document.documentElement.dataset.theme=value}}}}));</script></body></html>"#,
                 request.source_sha, prompt_context.prompt_version
             ),
             prompt_version: prompt_context.prompt_version,
@@ -252,6 +273,152 @@ impl PageGenerator for MockProvider {
     }
 }
 
+fn mock_navigation(snapshot: &glance_core::DirectorySnapshot, directory: &Path) -> String {
+    let mut html = String::from(r#"<nav class="glance-nav" aria-label="Glance navigation">"#);
+    html.push_str(r#"<div class="glance-breadcrumb">"#);
+    for crumb in breadcrumb_dirs(directory) {
+        html.push_str(&format!(
+            r#"<a href="{}">{}</a>"#,
+            html_escape(&glance_check::directory_href(directory, &crumb)),
+            html_escape(&path_label(&crumb))
+        ));
+    }
+    html.push_str("</div>");
+
+    if directory != Path::new(".") {
+        let parent = parent_directory(directory);
+        html.push_str(&format!(
+            r#"<a class="glance-parent-link" href="{}">Parent</a>"#,
+            html_escape(&glance_check::directory_href(directory, &parent))
+        ));
+    }
+
+    let children = snapshot
+        .directory(directory)
+        .map(|record| record.child_dirs.clone())
+        .unwrap_or_default();
+    if !children.is_empty() {
+        html.push_str(r#"<div class="glance-nav-children">"#);
+        for child in children {
+            html.push_str(&format!(
+                r#"<a href="{}">{}</a>"#,
+                html_escape(&glance_check::directory_href(directory, &child)),
+                html_escape(&path_label(&child))
+            ));
+        }
+        html.push_str("</div>");
+    }
+
+    let siblings = sibling_dirs(snapshot, directory);
+    if !siblings.is_empty() {
+        html.push_str(r#"<div class="glance-nav-siblings">"#);
+        for sibling in siblings {
+            html.push_str(&format!(
+                r#"<a href="{}">{}</a>"#,
+                html_escape(&glance_check::directory_href(directory, &sibling)),
+                html_escape(&path_label(&sibling))
+            ));
+        }
+        html.push_str("</div>");
+    }
+
+    html.push_str("</nav>");
+    html
+}
+
+fn mock_composition(
+    snapshot: &glance_core::DirectorySnapshot,
+    directory: &Path,
+    cited_attr: &str,
+) -> String {
+    let children = snapshot
+        .directory(directory)
+        .map(|record| record.child_dirs.clone())
+        .unwrap_or_default();
+    if children.is_empty() {
+        return format!(r#"<p{cited_attr}>No child directories.</p>"#);
+    }
+
+    let mut html = String::new();
+    for child in children {
+        html.push_str(&format!(
+            r#"<article class="glance-child"><a class="glance-child-link" href="{}">{}</a><p class="glance-child-role">Mock child role for {}.</p></article>"#,
+            html_escape(&glance_check::directory_href(directory, &child)),
+            html_escape(&path_label(&child)),
+            html_escape(&path_label(&child))
+        ));
+    }
+    html
+}
+
+fn breadcrumb_dirs(directory: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from(".")];
+    if directory == Path::new(".") {
+        return dirs;
+    }
+    let mut current = PathBuf::new();
+    for component in directory.components() {
+        if let std::path::Component::Normal(part) = component {
+            current.push(part);
+            dirs.push(current.clone());
+        }
+    }
+    dirs
+}
+
+fn parent_directory(directory: &Path) -> PathBuf {
+    directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn sibling_dirs(snapshot: &glance_core::DirectorySnapshot, directory: &Path) -> Vec<PathBuf> {
+    if directory == Path::new(".") {
+        return Vec::new();
+    }
+    let parent = directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut siblings = snapshot
+        .directory(parent)
+        .map(|record| {
+            record
+                .child_dirs
+                .iter()
+                .filter(|child| child.as_path() != directory)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    siblings.sort();
+    siblings
+}
+
+fn path_label(path: &Path) -> String {
+    if path == Path::new(".") {
+        ".".to_owned()
+    } else {
+        path.components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct GenerationConfig {
@@ -260,6 +427,7 @@ pub struct GenerationConfig {
     pub budget: BudgetConfig,
     pub retry: RetryConfig,
     pub prompt: PromptConfig,
+    pub image: ImageConfig,
 }
 
 impl Default for GenerationConfig {
@@ -270,6 +438,7 @@ impl Default for GenerationConfig {
             budget: BudgetConfig::default(),
             retry: RetryConfig::default(),
             prompt: PromptConfig::default(),
+            image: ImageConfig::default(),
         }
     }
 }
@@ -642,6 +811,7 @@ impl RealPageGenerator {
         output.html = normalize_glance_directory_attribute(&output.html, &request.directory);
         output.html = ensure_required_navigation_links(&output.html, request)?;
         output.html = ensure_root_flow_diagram(&output.html, request)?;
+        output.html = ensure_root_image_request(&output.html, request)?;
         validate_generated_navigation(&output.html, request)?;
         Ok(output)
     }
@@ -806,6 +976,40 @@ fn ensure_root_flow_diagram(
         r#"<section class="glance-section glance-generated-flow"><style>@keyframes glance-flow-pulse{{0%{{opacity:.25;transform:translateX(0)}}50%{{opacity:1}}100%{{opacity:.25;transform:translateX(520px)}}}}@media (prefers-reduced-motion: reduce){{.glance-flow-dot{{display:none}}}}.glance-diagram text{{font:12px ui-monospace,monospace;text-anchor:middle;fill:currentColor}}.glance-diagram rect{{fill:transparent;stroke:currentColor;stroke-opacity:.35}}.glance-diagram path{{stroke:currentColor;stroke-opacity:.45;fill:none}}.glance-flow-dot{{animation:glance-flow-pulse 4s linear infinite;transform-box:fill-box}}</style><svg class="glance-diagram" viewBox="0 0 760 170" role="img" aria-label="Animated flow from source tree through prompts and checks into generated pages"><title>Glance generation flow</title><path d="M76 88 H684"></path>{lanes}<g><rect x="206" y="96" width="112" height="42" rx="7"></rect><text x="262" y="121">tier prompts</text></g><g><rect x="368" y="96" width="128" height="42" rx="7"></rect><text x="432" y="121">citation + nav check</text></g><g><rect x="548" y="96" width="116" height="42" rx="7"></rect><text x="606" y="121">published HTML</text></g><circle class="glance-flow-dot" cx="80" cy="88" r="6"></circle></svg></section>"#
     );
     Ok(insert_after_opening_body(html, &diagram).unwrap_or_else(|| html.to_owned()))
+}
+
+fn ensure_root_image_request(
+    html: &str,
+    request: &GenerationRequest,
+) -> Result<String, GenerationError> {
+    if request.directory != Path::new(".")
+        || html.contains("data-glance-image-prompt")
+        || html.contains("glance-image")
+    {
+        return Ok(html.to_owned());
+    }
+    let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
+        .map_err(|error| GenerationError::Context {
+            message: error.to_string(),
+        })?;
+    let Some(root) = snapshot.directory(Path::new(".")) else {
+        return Ok(html.to_owned());
+    };
+    let mut labels = root
+        .child_dirs
+        .iter()
+        .map(|child| path_label(child))
+        .collect::<Vec<_>>();
+    labels.sort();
+    let prompt = format!(
+        "Create a clean architectural illustration for the Glance documentation generator. Show a source tree with these root areas: {}. Show tier prompts, deterministic citation/navigation checks, and published HTML pages connected by directional flow. Use legible geometric blocks, restrained color, no tiny text, and no logos.",
+        labels.join(", ")
+    );
+    let figure = format!(
+        r#"<figure class="glance-image-request" data-glance-image-prompt="{}" data-glance-image-alt="Glance repository architecture illustration"></figure>"#,
+        html_escape(&prompt)
+    );
+    Ok(insert_after_opening_body(html, &figure).unwrap_or_else(|| html.to_owned()))
 }
 
 fn validate_generated_navigation(
@@ -1941,6 +2145,11 @@ mod tests {
 
         assert!(page.html.contains("glance-diagram"));
         assert!(page.html.contains("@keyframes glance-flow-pulse"));
+        assert!(page.html.contains("data-glance-image-prompt"));
+        assert!(
+            page.html
+                .contains("Glance repository architecture illustration")
+        );
         assert!(page.html.contains("src"));
     }
 

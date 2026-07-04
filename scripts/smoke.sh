@@ -79,9 +79,17 @@ test -f "$tmpdir/generated-site/metadata.json"
 test -f "$tmpdir/generated-site/docs/index.html"
 test -f "$tmpdir/generated-site/src/index.html"
 test -f "$tmpdir/generated-site/src/parser/index.html"
-grep -q '"prompt_version": "glance-005-root-v3"' "$tmpdir/generated-site/metadata.json"
+grep -q '"prompt_version": "glance-006-root-v1"' "$tmpdir/generated-site/metadata.json"
 grep -q 'data-glance-section="what-this-is"' "$tmpdir/generated-site/index.html"
 grep -q 'data-glance-section="failure-edge-index"' "$tmpdir/generated-site/index.html"
+grep -q 'href="docs/index.html"' "$tmpdir/generated-site/index.html"
+grep -q 'href="src/index.html"' "$tmpdir/generated-site/index.html"
+grep -q 'href="../index.html"' "$tmpdir/generated-site/docs/index.html"
+grep -q 'href="parser/index.html"' "$tmpdir/generated-site/src/index.html"
+grep -q 'glance-diagram' "$tmpdir/generated-site/index.html"
+grep -q 'data-theme-choice="auto"' "$tmpdir/generated-site/index.html"
+grep -q '<img src="glance-image-001.png"' "$tmpdir/generated-site/index.html"
+test -f "$tmpdir/generated-site/glance-image-001.png"
 cargo run -q -p glance -- check \
   --source-root "$tmpdir/mini-source" \
   --source-sha "$mini_sha" \
