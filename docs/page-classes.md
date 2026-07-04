@@ -13,6 +13,12 @@ depend on them.
 - `.glance-cited` on elements that make factual claims and carry
   `data-glance-cite`.
 
+`data-glance-cite` uses the canonical grammar
+`path:start-end[,start-end...][,path:start-end...]`. Each comma-separated
+segment is either a repo-relative `path:start-end` citation or a bare
+`start-end` range that inherits the previous path. The first segment must name
+a path.
+
 ## Required sections
 
 Every page must include one element for each section below. Use both the class

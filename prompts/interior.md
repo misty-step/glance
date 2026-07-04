@@ -43,17 +43,19 @@ paragraph, list item, or table row whose factual sentence is directly supported
 by the cited source lines.
 
 Citation attributes are machine-checked before the page is written. Use the
-canonical grammar `path:start-end[,start-end...]`: one repo-relative path,
-followed by one or more comma-separated ranges for that same path, including
-citations carried forward from child pages.
+canonical grammar `path:start-end[,start-end...][,path:start-end...]`: each
+comma-separated segment is either `path:start-end` or a bare `start-end` range
+that inherits the previous path, including citations carried forward from child
+pages.
 
 GOOD:
 `<p class="glance-cited" data-glance-cite="src/lib.rs:1-4">The root file binds the child module.</p>`
 `<p class="glance-cited" data-glance-cite="src/lib.rs:1-4,7-8">The root file binds two child edges.</p>`
+`<p class="glance-cited" data-glance-cite="src/lib.rs:1-4,src/child.rs:5-8">Two files define the edge.</p>`
 
 BAD:
 `<p class="glance-cited" data-glance-cite="1-4">The root file binds the child module.</p>`
-`<p class="glance-cited" data-glance-cite="src/lib.rs:1-4,src/child.rs:5-8">Two paths share one attribute.</p>`
+`<p class="glance-cited" data-glance-cite="1-4,src/lib.rs:5-8">The first segment has no path to inherit.</p>`
 
 # Ancestor Constraints
 

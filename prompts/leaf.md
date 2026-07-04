@@ -44,16 +44,18 @@ item, or table row whose factual sentence is directly supported by the cited
 source lines.
 
 Citation attributes are machine-checked before the page is written. Use the
-canonical grammar `path:start-end[,start-end...]`: one repo-relative path,
-followed by one or more comma-separated ranges for that same path.
+canonical grammar `path:start-end[,start-end...][,path:start-end...]`: each
+comma-separated segment is either `path:start-end` or a bare `start-end` range
+that inherits the previous path.
 
 GOOD:
 `<p class="glance-cited" data-glance-cite="docs/guide.md:1-3">The guide defines the directory rule.</p>`
 `<p class="glance-cited" data-glance-cite="docs/guide.md:1-3,5-6">The guide defines two linked rules.</p>`
+`<p class="glance-cited" data-glance-cite="docs/guide.md:1-3,docs/other.md:4-6">Two files define related rules.</p>`
 
 BAD:
 `<p class="glance-cited" data-glance-cite="1-3">The guide defines the directory rule.</p>`
-`<p class="glance-cited" data-glance-cite="docs/guide.md:1-3,docs/other.md:4-6">Two paths share one attribute.</p>`
+`<p class="glance-cited" data-glance-cite="1-3,docs/guide.md:4-6">The first segment has no path to inherit.</p>`
 
 # Ancestor Constraints
 
