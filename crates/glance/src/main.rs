@@ -264,6 +264,7 @@ struct RunImageManifest {
     rendered: usize,
     failed: usize,
     skipped: usize,
+    spend_micros: u64,
     files: Vec<String>,
 }
 
@@ -563,6 +564,7 @@ fn run_image_manifest(report: &ImageRenderReport, output_dir: &Path) -> RunImage
         rendered: report.rendered,
         failed: report.failed,
         skipped: report.skipped,
+        spend_micros: report.spend_micros,
         files: report
             .files
             .iter()
@@ -1236,6 +1238,18 @@ mod tests {
         assert!(root_html.contains("data-theme-choice=\"system\""));
         assert!(root_html.contains(r#"<img src="glance-image-001.png""#));
         assert!(site.path().join("glance-image-001.png").is_file());
+
+        let summary = std::fs::read_to_string(site.path().join("run-summary.json"))
+            .expect("summary")
+            .parse::<serde_json::Value>()
+            .expect("summary json");
+        let root_page = summary["pages"]
+            .as_array()
+            .expect("pages")
+            .iter()
+            .find(|page| page["directory"] == ".")
+            .expect("root page");
+        assert_eq!(root_page["image"]["spend_micros"], 0);
     }
 
     #[cfg(unix)]
