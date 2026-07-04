@@ -16,8 +16,8 @@ This founding slice intentionally ships only the deterministic core:
 - `glance`: CLI entrypoint for `run`, `plan`, `check`, `publish`, and
   `serve-local`.
 
-Page templates, webhook triggers, and deployed site serving are backlog work.
-The old Go tool at `phrazzld/glance` is reference material only.
+Work is tracked as `repo: glance` cards in Powder (the Sanctum board), not in
+this repo. The old Go tool at `phrazzld/glance` is reference material only.
 
 ## Generation providers
 
