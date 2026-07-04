@@ -377,10 +377,14 @@ fn collect_generated_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> 
 }
 
 fn is_generated_payload(relative: &Path) -> bool {
-    matches!(
-        relative.extension().and_then(OsStr::to_str),
-        Some("html" | "json" | "toml")
-    )
+    let extension = relative.extension().and_then(OsStr::to_str);
+    if matches!(extension, Some("html" | "json" | "toml")) {
+        return true;
+    }
+
+    let filename = relative.file_name().and_then(OsStr::to_str).unwrap_or("");
+    filename.starts_with("glance-image-")
+        && matches!(extension, Some("png" | "jpg" | "jpeg" | "webp" | "svg"))
 }
 
 fn write_publish_metadata(
@@ -625,6 +629,7 @@ mod tests {
         let site = temp.path().join("site");
         fs::create_dir_all(site.join("src/parser"))?;
         fs::write(site.join("index.html"), "<!doctype html><p>root</p>")?;
+        fs::write(site.join("glance-image-001.png"), [137, 80, 78, 71])?;
         fs::write(
             site.join("src/parser/index.html"),
             "<!doctype html><p>parser</p>",
@@ -670,6 +675,7 @@ mod tests {
             ],
         )?;
         assert!(inspect.join("index.html").is_file());
+        assert!(inspect.join("glance-image-001.png").is_file());
         assert!(inspect.join("src/parser/index.html").is_file());
         assert!(inspect.join("metadata.json").is_file());
         assert!(inspect.join(".glance/source.toml").is_file());
