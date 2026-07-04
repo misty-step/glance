@@ -567,11 +567,13 @@ fn check_command(
     let checker = CitationChecker::new(&source_root, source_sha);
     let mut total_citations = 0;
     let mut total_failures = 0;
+    let mut total_navigation_failures = 0;
 
     for html_file in html_files {
         let report = checker.check_html_file(&html_file)?;
         total_citations += report.citations_checked;
         total_failures += report.failures.len();
+        total_navigation_failures += report.navigation_failures.len();
         if report.is_ok() {
             println!(
                 "ok {} citations={}",
@@ -594,14 +596,24 @@ fn check_command(
                     failure.message
                 );
             }
+            for failure in report.navigation_failures {
+                println!(
+                    "  navigation {} {}",
+                    failure.directory.display(),
+                    failure.message
+                );
+            }
         }
     }
 
-    if total_failures > 0 {
-        bail!("{total_failures} broken citations across {total_citations} checked citations");
+    if total_failures > 0 || total_navigation_failures > 0 {
+        bail!(
+            "{} validation failures across {total_citations} checked citations (citation_failures={total_failures}, navigation_failures={total_navigation_failures})",
+            total_failures + total_navigation_failures
+        );
     }
 
-    println!("checked {total_citations} citations");
+    println!("checked {total_citations} citations and navigation");
     Ok(())
 }
 

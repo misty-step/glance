@@ -639,6 +639,9 @@ impl RealPageGenerator {
             &request.source_root,
             &request.directory,
         )?;
+        output.html = normalize_glance_directory_attribute(&output.html, &request.directory);
+        output.html = ensure_required_navigation_links(&output.html, request)?;
+        validate_generated_navigation(&output.html, request)?;
         Ok(output)
     }
 
@@ -646,6 +649,145 @@ impl RealPageGenerator {
         let mut budget = self.budget.lock().expect("budget mutex");
         budget.reserved_micros = budget.reserved_micros.saturating_sub(estimated_micros);
     }
+}
+
+fn normalize_glance_directory_attribute(html: &str, directory: &Path) -> String {
+    let directory = html_escape(&path_label(directory));
+    let mut output = String::with_capacity(html.len());
+    let mut cursor = 0;
+    let needle = "data-glance-directory";
+    let bytes = html.as_bytes();
+
+    while let Some(relative) = html[cursor..].find(needle) {
+        let attr_start = cursor + relative;
+        let mut index = attr_start + needle.len();
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'=') {
+            if bytes
+                .get(index)
+                .is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
+            {
+                output.push_str(&html[cursor..attr_start + needle.len()]);
+                output.push_str(&format!("=\"{directory}\""));
+                cursor = attr_start + needle.len();
+                continue;
+            }
+            output.push_str(&html[cursor..index]);
+            cursor = index;
+            continue;
+        }
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        let Some(quote) = bytes.get(index).copied() else {
+            output.push_str(&html[cursor..]);
+            return output;
+        };
+        if quote != b'"' && quote != b'\'' {
+            output.push_str(&html[cursor..=index]);
+            cursor = index + 1;
+            continue;
+        }
+        let value_start = index + 1;
+        let Some(value_end) = html[value_start..]
+            .find(char::from(quote))
+            .map(|relative| value_start + relative)
+        else {
+            output.push_str(&html[cursor..]);
+            return output;
+        };
+
+        output.push_str(&html[cursor..value_start]);
+        output.push_str(&directory);
+        output.push(char::from(quote));
+        cursor = value_end + 1;
+    }
+
+    output.push_str(&html[cursor..]);
+    output
+}
+
+fn ensure_required_navigation_links(
+    html: &str,
+    request: &GenerationRequest,
+) -> Result<String, GenerationError> {
+    let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
+        .map_err(|error| GenerationError::Context {
+            message: error.to_string(),
+        })?;
+    let Some(record) = snapshot.directory(&request.directory) else {
+        return Ok(html.to_owned());
+    };
+
+    let mut links = Vec::new();
+    if request.directory != Path::new(".") {
+        let parent = request
+            .directory
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        links.push(format!(
+            r#"<a class="glance-nav-parent" href="{}">Parent</a>"#,
+            html_escape(&glance_check::directory_href(&request.directory, parent))
+        ));
+    }
+    let mut children = record.child_dirs.clone();
+    children.sort();
+    for child in children {
+        links.push(format!(
+            r#"<a class="glance-nav-child" href="{}">{}</a>"#,
+            html_escape(&glance_check::directory_href(&request.directory, &child)),
+            html_escape(&path_label(&child))
+        ));
+    }
+
+    if links.is_empty() {
+        return Ok(html.to_owned());
+    }
+
+    let nav = format!(
+        r#"<nav class="glance-nav glance-nav-generated" aria-label="Generated navigation">{}</nav>"#,
+        links.join("")
+    );
+    Ok(insert_after_opening_body(html, &nav).unwrap_or_else(|| html.to_owned()))
+}
+
+fn insert_after_opening_body(html: &str, insertion: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let body_start = lower.find("<body")?;
+    let body_end = html[body_start..]
+        .find('>')
+        .map(|offset| body_start + offset + 1)?;
+    let mut output = String::with_capacity(html.len() + insertion.len());
+    output.push_str(&html[..body_end]);
+    output.push_str(insertion);
+    output.push_str(&html[body_end..]);
+    Some(output)
+}
+
+fn validate_generated_navigation(
+    html: &str,
+    request: &GenerationRequest,
+) -> Result<(), GenerationError> {
+    let snapshot = glance_core::snapshot_tree(&request.source_root, request.source_sha.clone())
+        .map_err(|error| GenerationError::Context {
+            message: error.to_string(),
+        })?;
+    let failures = glance_check::validate_navigation(html, &snapshot);
+    if failures.is_empty() {
+        return Ok(());
+    }
+    let summary = failures
+        .iter()
+        .map(|failure| format!("{}: {}", failure.directory.display(), failure.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(GenerationError::InvalidHtml {
+        message: format!("navigation validation failed: {summary}"),
+    })
 }
 
 pub struct FallbackClient {
@@ -1583,12 +1725,153 @@ mod tests {
     }
 
     #[test]
+    fn real_generator_retries_missing_navigation_then_accepts_fixed_page() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("README.md"), "one\n").expect("fixture");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bad_html = r#"<!doctype html><html><body><p data-glance-cite="README.md:1">missing nav</p></body></html>"#;
+        let good_html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"></nav><p data-glance-cite="README.md:1">fixed nav</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: prompts.clone(),
+            outputs: std::sync::Mutex::new(vec![
+                Ok(provider_output(good_html, Some("stop"), Some(1))),
+                Ok(provider_output(bad_html, Some("stop"), Some(1))),
+            ]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let page = generator
+            .generate(
+                GenerationRequest::new(
+                    temp.path().to_path_buf(),
+                    PathBuf::from("."),
+                    "sha".to_owned(),
+                    PageKind::Root,
+                )
+                .with_prompt_context(PromptContext {
+                    prompt: "source prompt".to_owned(),
+                    prompt_version: "test-prompt".to_owned(),
+                    estimated_input_tokens: 1,
+                    metadata_notes: Vec::new(),
+                    primary_citation: None,
+                    degraded_children: Vec::new(),
+                }),
+            )
+            .expect("navigation retry should recover");
+
+        assert!(page.html.contains("data-glance-directory"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            prompts
+                .lock()
+                .expect("prompts")
+                .last()
+                .expect("retry prompt")
+                .contains("navigation validation failed")
+        );
+    }
+
+    #[test]
+    fn real_generator_fills_empty_navigation_directory_placeholder() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("README.md"), "one\n").expect("fixture");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="   "><nav class="glance-nav"></nav><p data-glance-cite="README.md:1">root page</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let page = generator
+            .generate(
+                GenerationRequest::new(
+                    temp.path().to_path_buf(),
+                    PathBuf::from("."),
+                    "sha".to_owned(),
+                    PageKind::Root,
+                )
+                .with_prompt_context(PromptContext {
+                    prompt: "source prompt".to_owned(),
+                    prompt_version: "test-prompt".to_owned(),
+                    estimated_input_tokens: 1,
+                    metadata_notes: Vec::new(),
+                    primary_citation: None,
+                    degraded_children: Vec::new(),
+                }),
+            )
+            .expect("empty directory placeholder should be filled");
+
+        assert!(page.html.contains(r#"data-glance-directory=".""#));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn normalize_glance_directory_attribute_repairs_model_coordinates() {
+        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory><nav></nav></body></html>"#;
+        let wrong = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav></nav></body></html>"#;
+
+        let repaired = normalize_glance_directory_attribute(html, Path::new("src/parser"));
+        let corrected = normalize_glance_directory_attribute(wrong, Path::new("src/parser"));
+
+        assert!(repaired.contains(r#"data-glance-directory="src/parser">"#));
+        assert!(corrected.contains(r#"data-glance-directory="src/parser">"#));
+    }
+
+    #[test]
+    fn real_generator_injects_required_parent_navigation_link() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("src")).expect("src");
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").expect("fixture");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="src"><p data-glance-cite="lib.rs:1">source page</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let page = generator
+            .generate(
+                GenerationRequest::new(
+                    temp.path().to_path_buf(),
+                    PathBuf::from("src"),
+                    "sha".to_owned(),
+                    PageKind::Leaf,
+                )
+                .with_prompt_context(PromptContext {
+                    prompt: "source prompt".to_owned(),
+                    prompt_version: "test-prompt".to_owned(),
+                    estimated_input_tokens: 1,
+                    metadata_notes: Vec::new(),
+                    primary_citation: None,
+                    degraded_children: Vec::new(),
+                }),
+            )
+            .expect("parent link should be injected");
+
+        assert!(
+            page.html
+                .contains(r#"class="glance-nav glance-nav-generated""#)
+        );
+        assert!(page.html.contains(r#"href="../index.html""#));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn real_generator_accepts_one_path_with_multiple_citation_ranges() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(temp.path().join("src")).expect("src");
         std::fs::write(temp.path().join("src/lib.rs"), "one\ntwo\nthree\n").expect("fixture");
         let attempts = Arc::new(AtomicUsize::new(0));
-        let html = r#"<!doctype html><html><body><p data-glance-cite="src/lib.rs:1-2,3-3">split cite</p></body></html>"#;
+        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"><a href="src/index.html">src</a></nav><p data-glance-cite="src/lib.rs:1-2,3-3">split cite</p></body></html>"#;
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
@@ -1630,7 +1913,7 @@ mod tests {
         std::fs::write(temp.path().join("prompts/root.md"), "one\ntwo\nthree\n").expect("root");
         std::fs::write(temp.path().join("prompts/leaf.md"), "one\ntwo\nthree\n").expect("leaf");
         let attempts = Arc::new(AtomicUsize::new(0));
-        let html = r#"<!doctype html><html><body><p data-glance-cite="prompts/root.md:1-2,3-3,prompts/leaf.md:2-3">split paths</p></body></html>"#;
+        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"><a href="prompts/index.html">prompts</a></nav><p data-glance-cite="prompts/root.md:1-2,3-3,prompts/leaf.md:2-3">split paths</p></body></html>"#;
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),
@@ -1671,7 +1954,7 @@ mod tests {
         std::fs::create_dir(temp.path().join("src")).expect("src");
         std::fs::write(temp.path().join("src/lib.rs"), "one\n").expect("fixture");
         let attempts = Arc::new(AtomicUsize::new(0));
-        let html = r#"<!doctype html><html><body><p data-glance-cite="lib.rs:1">dir-relative cite</p></body></html>"#;
+        let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="src"><nav class="glance-nav"><a href="../index.html">Parent</a></nav><p data-glance-cite="lib.rs:1">dir-relative cite</p></body></html>"#;
         let provider = Box::new(ScriptedClient {
             name: "scripted",
             attempts: attempts.clone(),

@@ -246,6 +246,7 @@ impl<'a> ContextPacket<'a> {
         existing_pages: &BTreeMap<PathBuf, String>,
     ) -> Result<(), GenerationError> {
         self.add_repository_section();
+        self.add_navigation_section();
         match self.kind {
             PageKind::Leaf => {
                 self.add_local_files_section(max_file_bytes, LocalFileMode::Direct)?;
@@ -281,11 +282,82 @@ impl<'a> ContextPacket<'a> {
         let one_liner = repo_one_liner(&self.snapshot.source_root)
             .unwrap_or_else(|| self.snapshot.source_root.display().to_string());
         self.sections.push(format!(
-            "## Repository\n- one_liner: {one_liner}\n- source_sha: {}\n- directory: {}\n- kind: {}\n",
+            "## Repository\n- repo_name: {}\n- one_liner: {one_liner}\n- source_sha: {}\n- directory: {}\n- kind: {}\n",
+            repo_name(&self.snapshot.source_root),
             self.snapshot.source_sha,
             path_display(&self.directory),
             self.kind.label()
         ));
+    }
+
+    fn add_navigation_section(&mut self) {
+        let mut section = String::from("## Navigation\n");
+        section.push_str(&format!(
+            "- repo_name: {}\n",
+            repo_name(&self.snapshot.source_root)
+        ));
+        section.push_str(&format!("- own_path: {}\n", path_display(&self.directory)));
+        if self.directory == Path::new(".") {
+            section.push_str("- parent: none\n");
+        } else {
+            let parent = parent_directory(&self.directory);
+            section.push_str(&format!(
+                "- parent: {} href={}\n",
+                path_display(&parent),
+                glance_check::directory_href(&self.directory, &parent)
+            ));
+        }
+
+        let breadcrumb = breadcrumb_dirs(&self.directory)
+            .into_iter()
+            .map(|path| {
+                format!(
+                    "{} href={}",
+                    path_display(&path),
+                    glance_check::directory_href(&self.directory, &path)
+                )
+            })
+            .collect::<Vec<_>>();
+        section.push_str(&format!(
+            "- breadcrumb: {}\n",
+            if breadcrumb.is_empty() {
+                "none".to_owned()
+            } else {
+                breadcrumb.join(" -> ")
+            }
+        ));
+
+        let siblings = sibling_dirs(self.snapshot, &self.directory);
+        if siblings.is_empty() {
+            section.push_str("- sibling_dirs: none\n");
+        } else {
+            for sibling in siblings {
+                section.push_str(&format!(
+                    "- sibling: {} href={}\n",
+                    path_display(&sibling),
+                    glance_check::directory_href(&self.directory, &sibling)
+                ));
+            }
+        }
+
+        let children = self
+            .snapshot
+            .directory(&self.directory)
+            .map(|record| record.child_dirs.clone())
+            .unwrap_or_default();
+        if children.is_empty() {
+            section.push_str("- child_dirs: none\n");
+        } else {
+            for child in children {
+                section.push_str(&format!(
+                    "- child: {} href={}\n",
+                    path_display(&child),
+                    glance_check::directory_href(&self.directory, &child)
+                ));
+            }
+        }
+
+        self.sections.push(section);
     }
 
     fn add_local_files_section(
@@ -794,7 +866,42 @@ fn parent_chain(directory: &Path) -> Vec<PathBuf> {
     parents
 }
 
+fn breadcrumb_dirs(directory: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from(".")];
+    if directory == Path::new(".") {
+        return dirs;
+    }
+    let mut current = PathBuf::new();
+    for component in directory.components() {
+        if let std::path::Component::Normal(part) = component {
+            current.push(part);
+            dirs.push(current.clone());
+        }
+    }
+    dirs
+}
+
+fn parent_directory(directory: &Path) -> PathBuf {
+    directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn sibling_dir_names(snapshot: &DirectorySnapshot, directory: &Path) -> Vec<String> {
+    sibling_dirs(snapshot, directory)
+        .into_iter()
+        .filter_map(|child| {
+            child
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn sibling_dirs(snapshot: &DirectorySnapshot, directory: &Path) -> Vec<PathBuf> {
     if directory == Path::new(".") {
         return Vec::new();
     }
@@ -809,13 +916,20 @@ fn sibling_dir_names(snapshot: &DirectorySnapshot, directory: &Path) -> Vec<Stri
                 .child_dirs
                 .iter()
                 .filter(|child| child.as_path() != directory)
-                .filter_map(|child| child.file_name().and_then(|name| name.to_str()))
-                .map(str::to_owned)
+                .cloned()
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     names.sort();
     names
+}
+
+fn repo_name(source_root: &Path) -> String {
+    source_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| source_root.display().to_string())
 }
 
 fn normalize_directory(path: &Path) -> PathBuf {
@@ -894,7 +1008,11 @@ pub(crate) fn validate_provider_output(output: &ProviderOutput) -> Result<(), Ge
 
 pub(crate) fn is_retryable_output_validation(error: &GenerationError) -> bool {
     match error {
-        GenerationError::InvalidHtml { message } => message.contains("data-glance-cite"),
+        GenerationError::InvalidHtml { message } => {
+            message.contains("data-glance-cite")
+                || message.contains("navigation validation failed")
+                || message.contains("data-glance-directory")
+        }
         _ => false,
     }
 }
