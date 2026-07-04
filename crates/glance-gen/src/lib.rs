@@ -1115,7 +1115,9 @@ impl HttpTransport for UreqTransport {
         headers: &[(&str, String)],
         body: &Value,
     ) -> Result<HttpResponse, GenerationError> {
-        let mut request = ureq::post(url).set("Content-Type", "application/json");
+        let mut request = ureq::post(url)
+            .timeout(Duration::from_secs(120))
+            .set("Content-Type", "application/json");
         for (name, value) in headers {
             request = request.set(name, value);
         }
