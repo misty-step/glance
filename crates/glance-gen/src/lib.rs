@@ -834,50 +834,40 @@ impl PageGenerator for RealPageGenerator {
         let mut total_input_tokens = 0;
         let mut total_output_tokens = 0;
         let mut total_spend_micros = 0;
-        let first_output = match self.client.generate_once(&prompt, route, request.kind) {
-            Ok(output) => output,
-            Err(error) => {
-                self.release_reservation(estimated_micros);
-                return Err(error);
-            }
-        };
-        record_output_usage(
-            route,
-            &first_output,
-            &mut total_input_tokens,
-            &mut total_output_tokens,
-            &mut total_spend_micros,
-        );
-        let output = match self.postprocess_output(first_output, &request) {
-            Ok(output) => output,
-            Err(error) if is_retryable_output_validation(&error) => {
-                retries += 1;
-                let prompt = prompt.with_retry_feedback(&error.to_string());
-                let retry_output = match self.client.generate_once(&prompt, route, request.kind) {
+        let validation_attempts = self.client.validation_attempts();
+        let mut attempt_prompt = prompt.clone();
+        let output = loop {
+            let provider_output =
+                match self
+                    .client
+                    .generate_once(&attempt_prompt, route, request.kind)
+                {
                     Ok(output) => output,
                     Err(error) => {
                         self.release_reservation(estimated_micros);
                         return Err(error);
                     }
                 };
-                record_output_usage(
-                    route,
-                    &retry_output,
-                    &mut total_input_tokens,
-                    &mut total_output_tokens,
-                    &mut total_spend_micros,
-                );
-                match self.postprocess_output(retry_output, &request) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        self.release_reservation(estimated_micros);
-                        return Err(error);
-                    }
+            record_output_usage(
+                route,
+                &provider_output,
+                &mut total_input_tokens,
+                &mut total_output_tokens,
+                &mut total_spend_micros,
+            );
+            match self.postprocess_output(provider_output, &request) {
+                Ok(output) => break output,
+                Err(error)
+                    if is_retryable_output_validation(&error)
+                        && retries + 1 < validation_attempts =>
+                {
+                    retries += 1;
+                    attempt_prompt = prompt.with_retry_feedback(&error.to_string());
                 }
-            }
-            Err(error) => {
-                self.release_reservation(estimated_micros);
-                return Err(error);
+                Err(error) => {
+                    self.release_reservation(estimated_micros);
+                    return Err(error);
+                }
             }
         };
 
@@ -1016,6 +1006,10 @@ pub struct FallbackClient {
 impl FallbackClient {
     pub fn new(providers: Vec<Box<dyn ProviderClient>>, retry: RetryConfig) -> Self {
         Self { providers, retry }
+    }
+
+    fn validation_attempts(&self) -> u64 {
+        self.retry.max_attempts.max(1) as u64 + 1
     }
 }
 
