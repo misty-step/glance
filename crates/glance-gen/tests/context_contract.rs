@@ -21,7 +21,8 @@ fn leaf_context_contains_only_leaf_inputs() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-006-leaf-v1");
+    assert_eq!(context.prompt_version, "glance-007-leaf-v1");
+    assert!(context.prompt.contains("Glance Page Spec Catalog v001"));
     assert!(context.prompt.contains("## Repository"));
     assert!(context.prompt.contains("- source_sha: fixture-sha"));
     assert!(context.prompt.contains("- directory: docs"));
@@ -37,6 +38,9 @@ fn leaf_context_contains_only_leaf_inputs() {
     );
     assert!(context.prompt.contains("- child_dirs: none"));
     assert!(context.prompt.contains("## Local file contents"));
+    assert!(context.prompt.contains("## File signatures"));
+    assert!(context.prompt.contains("- file: docs/guide.md"));
+    assert!(context.prompt.contains("# Guide"));
     assert!(context.prompt.contains("### docs/guide.md"));
     assert!(context.prompt.contains("1 | # Guide"));
     assert!(context.prompt.contains("## Parent chain"));
@@ -44,7 +48,13 @@ fn leaf_context_contains_only_leaf_inputs() {
     assert!(context.prompt.contains("## Sibling directory names"));
     assert!(context.prompt.contains("- src"));
     assert!(!context.prompt.contains("## Child pages"));
-    assert!(!context.prompt.contains("src/lib.rs"));
+    assert!(!context.prompt.contains("### src/lib.rs"));
+    assert!(
+        context
+            .context_blocks
+            .iter()
+            .any(|block| block.name == "File signatures" && block.byte_size > 0)
+    );
 }
 
 #[test]
@@ -71,7 +81,8 @@ fn interior_context_distills_generated_children_and_parent_chain() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-006-interior-v1");
+    assert_eq!(context.prompt_version, "glance-007-interior-v1");
+    assert!(context.prompt.contains("Glance Page Spec Catalog v001"));
     assert!(context.prompt.contains("## Navigation"));
     assert!(context.prompt.contains("- own_path: src"));
     assert!(context.prompt.contains("- parent: . href=../index.html"));
@@ -86,6 +97,8 @@ fn interior_context_distills_generated_children_and_parent_chain() {
             .contains("- sibling: docs href=../docs/index.html")
     );
     assert!(context.prompt.contains("### src/lib.rs"));
+    assert!(context.prompt.contains("## File signatures"));
+    assert!(context.prompt.contains("pub fn answer() -> u32"));
     assert!(context.prompt.contains("## Child pages"));
     assert!(context.prompt.contains("- directory: src/parser"));
     assert!(
@@ -155,7 +168,8 @@ fn root_context_uses_repo_metadata_and_all_child_pages() {
     )
     .expect("context");
 
-    assert_eq!(context.prompt_version, "glance-006-root-v1");
+    assert_eq!(context.prompt_version, "glance-007-root-v1");
+    assert!(context.prompt.contains("Glance Page Spec Catalog v001"));
     assert!(context.prompt.contains("## Navigation"));
     assert!(context.prompt.contains("- own_path: ."));
     assert!(context.prompt.contains("- parent: none"));
