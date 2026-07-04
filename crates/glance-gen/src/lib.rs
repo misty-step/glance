@@ -775,6 +775,7 @@ pub trait ProviderClient: Send + Sync {
         &self,
         prompt: &PromptContext,
         route: &ModelRoute,
+        kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError>;
 }
 
@@ -833,7 +834,7 @@ impl PageGenerator for RealPageGenerator {
         let mut total_input_tokens = 0;
         let mut total_output_tokens = 0;
         let mut total_spend_micros = 0;
-        let first_output = match self.client.generate_once(&prompt, route) {
+        let first_output = match self.client.generate_once(&prompt, route, request.kind) {
             Ok(output) => output,
             Err(error) => {
                 self.release_reservation(estimated_micros);
@@ -852,7 +853,7 @@ impl PageGenerator for RealPageGenerator {
             Err(error) if is_retryable_output_validation(&error) => {
                 retries += 1;
                 let prompt = prompt.with_retry_feedback(&error.to_string());
-                let retry_output = match self.client.generate_once(&prompt, route) {
+                let retry_output = match self.client.generate_once(&prompt, route, request.kind) {
                     Ok(output) => output,
                     Err(error) => {
                         self.release_reservation(estimated_micros);
@@ -1015,6 +1016,7 @@ impl ProviderClient for FallbackClient {
         &self,
         prompt: &PromptContext,
         route: &ModelRoute,
+        kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
         if self.providers.is_empty() {
             return Err(GenerationError::Provider {
@@ -1027,7 +1029,7 @@ impl ProviderClient for FallbackClient {
         let mut last_error = None;
         for attempt in 0..self.retry.max_attempts.max(1) {
             for provider in self.matching_providers(route.provider) {
-                match provider.generate_once(prompt, route) {
+                match provider.generate_once(prompt, route, kind) {
                     Ok(output) => return Ok(output),
                     Err(error) if is_retryable(&error) => {
                         last_error = Some(error);
@@ -1181,8 +1183,9 @@ impl ProviderClient for OpenRouterClient {
         &self,
         prompt: &PromptContext,
         route: &ModelRoute,
+        kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
-        let response_format = catalog_response_format()?;
+        let response_format = catalog_response_format(kind)?;
         let body = json!({
             "model": route.model,
             "messages": [
@@ -1197,6 +1200,7 @@ impl ProviderClient for OpenRouterClient {
             ],
             "response_format": response_format,
             "reasoning": { "effort": "none", "exclude": true },
+            "plugins": [{ "id": "response-healing" }],
             "max_completion_tokens": route.max_tokens,
             "stream": false
         });
@@ -1287,6 +1291,7 @@ impl ProviderClient for GeminiClient {
         &self,
         prompt: &PromptContext,
         route: &ModelRoute,
+        _kind: PageKind,
     ) -> Result<ProviderOutput, GenerationError> {
         let model = route.model.trim_start_matches("models/");
         let endpoint = format!(
@@ -1354,12 +1359,8 @@ impl ProviderClient for GeminiClient {
     }
 }
 
-fn catalog_response_format() -> Result<Value, GenerationError> {
-    let schema = serde_json::from_str::<Value>(CATALOG_SCHEMA_JSON).map_err(|error| {
-        GenerationError::InvalidSpec {
-            message: format!("catalog schema is invalid JSON: {error}"),
-        }
-    })?;
+fn catalog_response_format(kind: PageKind) -> Result<Value, GenerationError> {
+    let schema = provider_catalog_schema(kind)?;
     Ok(json!({
         "type": "json_schema",
         "json_schema": {
@@ -1368,6 +1369,69 @@ fn catalog_response_format() -> Result<Value, GenerationError> {
             "schema": schema,
         }
     }))
+}
+
+fn provider_catalog_schema(kind: PageKind) -> Result<Value, GenerationError> {
+    let mut schema = serde_json::from_str::<Value>(CATALOG_SCHEMA_JSON).map_err(|error| {
+        GenerationError::InvalidSpec {
+            message: format!("catalog schema is invalid JSON: {error}"),
+        }
+    })?;
+    sanitize_schema_for_provider(&mut schema);
+    if !matches!(kind, PageKind::Root | PageKind::CrossCutting) {
+        if let Some(hero_properties) = schema
+            .pointer_mut("/$defs/hero/properties")
+            .and_then(Value::as_object_mut)
+        {
+            hero_properties.remove("image_request");
+        }
+    }
+    Ok(schema)
+}
+
+fn sanitize_schema_for_provider(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("$schema");
+            map.remove("$id");
+            if map.get("title").is_some_and(Value::is_string) {
+                map.remove("title");
+            }
+            map.remove("contains");
+            map.remove("minItems");
+            map.remove("maxItems");
+
+            if let Some(one_of) = map.remove("oneOf") {
+                map.insert("anyOf".to_owned(), one_of);
+            }
+            if let Some(const_value) = map.get("const") {
+                if !map.contains_key("type") {
+                    let value_type = match const_value {
+                        Value::String(_) => Some("string"),
+                        Value::Bool(_) => Some("boolean"),
+                        Value::Number(number) if number.is_i64() || number.is_u64() => {
+                            Some("integer")
+                        }
+                        Value::Number(_) => Some("number"),
+                        _ => None,
+                    };
+                    if let Some(value_type) = value_type {
+                        map.insert("type".to_owned(), Value::String(value_type.to_owned()));
+                    }
+                }
+            }
+
+            for child in map.values_mut() {
+                sanitize_schema_for_provider(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                sanitize_schema_for_provider(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn provider_http_error(provider: &'static str, status: u16, body: String) -> GenerationError {
@@ -1593,6 +1657,7 @@ mod tests {
                 GenerationConfig::default()
                     .routing
                     .model_for(PageKind::Leaf),
+                PageKind::Leaf,
             )
             .expect("provider output");
 
@@ -1616,11 +1681,27 @@ mod tests {
             true
         );
         assert_eq!(
-            request.body["response_format"]["json_schema"]["schema"]["$id"],
-            "https://misty-step.dev/glance/catalog/glance-catalog-001.schema.json"
+            request.body["response_format"]["json_schema"]["schema"]["properties"]["catalog_version"]
+                ["type"],
+            "string"
+        );
+        assert_eq!(
+            request.body["response_format"]["json_schema"]["schema"]["properties"]["title"]["type"],
+            "string"
+        );
+        assert!(
+            request.body["response_format"]["json_schema"]["schema"]["$id"].is_null(),
+            "provider schema strips catalog metadata"
+        );
+        assert!(
+            request.body["response_format"]["json_schema"]["schema"]["$defs"]["hero"]["properties"]
+                ["image_request"]
+                .is_null(),
+            "leaf provider schema forbids hero image_request"
         );
         assert_eq!(request.body["reasoning"]["effort"], "none");
         assert_eq!(request.body["reasoning"]["exclude"], true);
+        assert_eq!(request.body["plugins"][0]["id"], "response-healing");
         assert_eq!(request.body["stream"], false);
     }
 
@@ -1654,6 +1735,7 @@ mod tests {
                 GenerationConfig::default()
                     .routing
                     .model_for(PageKind::Leaf),
+                PageKind::Leaf,
             )
             .expect("server output");
 
@@ -1668,6 +1750,7 @@ mod tests {
         assert!(request.contains("\"name\":\"glance_page_spec\""));
         assert!(request.contains("\"strict\":true"));
         assert!(request.contains("\"reasoning\":{\"effort\":\"none\",\"exclude\":true}"));
+        assert!(request.contains("\"plugins\":[{\"id\":\"response-healing\"}]"));
     }
 
     #[test]
@@ -1704,7 +1787,7 @@ mod tests {
         };
 
         let output = client
-            .generate_once(&prompt, &route)
+            .generate_once(&prompt, &route, PageKind::Leaf)
             .expect("provider output");
 
         assert_eq!(output.html, page_spec_json("README.md", "1"));
@@ -1761,7 +1844,7 @@ mod tests {
         };
 
         let output = client
-            .generate_once(&prompt, &route)
+            .generate_once(&prompt, &route, PageKind::Leaf)
             .expect("server output");
 
         assert_eq!(output.html, page_spec_json("README.md", "1"));
@@ -1814,6 +1897,7 @@ mod tests {
                 GenerationConfig::default()
                     .routing
                     .model_for(PageKind::Leaf),
+                PageKind::Leaf,
             )
             .expect("fallback output");
 
@@ -1862,7 +1946,7 @@ mod tests {
         };
 
         let error = client
-            .generate_once(&prompt, &route)
+            .generate_once(&prompt, &route, PageKind::Leaf)
             .expect_err("preferred provider error");
 
         assert!(matches!(
@@ -2449,6 +2533,7 @@ mod tests {
             &self,
             _prompt: &PromptContext,
             _route: &ModelRoute,
+            _kind: PageKind,
         ) -> Result<ProviderOutput, GenerationError> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
             if attempt <= self.fail_until {
@@ -2487,6 +2572,7 @@ mod tests {
             &self,
             _prompt: &PromptContext,
             _route: &ModelRoute,
+            _kind: PageKind,
         ) -> Result<ProviderOutput, GenerationError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ProviderOutput {
@@ -2521,6 +2607,7 @@ mod tests {
             &self,
             prompt: &PromptContext,
             _route: &ModelRoute,
+            _kind: PageKind,
         ) -> Result<ProviderOutput, GenerationError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             self.prompts
