@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://misty-step.dev/glance/catalog/glance-catalog-001.schema.json",
+  "title": "Glance Page Spec Catalog v001",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["catalog_version", "title", "components"],
+  "properties": {
+    "catalog_version": { "const": "glance-catalog-001" },
+    "title": { "type": "string", "minLength": 1 },
+    "components": {
+      "type": "array",
+      "minItems": 3,
+      "prefixItems": [
+        { "$ref": "#/$defs/hero" },
+        {
+          "oneOf": [
+            { "$ref": "#/$defs/narrative" },
+            { "$ref": "#/$defs/flow_diagram" }
+          ]
+        }
+      ],
+      "items": { "$ref": "#/$defs/top_level_after_intro" },
+      "contains": { "$ref": "#/$defs/file_table" }
+    }
+  },
+  "$defs": {
+    "inline": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text", "path", "lines"],
+          "properties": {
+            "type": { "const": "cite" },
+            "text": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "minLength": 1 },
+            "lines": { "type": "string", "pattern": "^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text", "href"],
+          "properties": {
+            "type": { "const": "link" },
+            "text": { "type": "string", "minLength": 1 },
+            "href": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "lines"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "lines": { "type": "string", "minLength": 1 }
+      }
+    },
+    "hero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "title", "summary", "stats"],
+      "properties": {
+        "type": { "const": "hero" },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "array", "items": { "$ref": "#/$defs/inline" } },
+        "stats": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label", "value"],
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "value": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "image_request": { "$ref": "#/$defs/image_request" }
+      }
+    },
+    "image_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent"],
+      "properties": {
+        "intent": { "type": "string", "minLength": 1 },
+        "emphasis": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "narrative": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "heading", "paragraphs"],
+      "properties": {
+        "type": { "const": "narrative" },
+        "heading": { "type": "string", "minLength": 1 },
+        "paragraphs": {
+          "type": "array",
+          "items": { "type": "array", "items": { "$ref": "#/$defs/inline" } }
+        }
+      }
+    },
+    "flow_diagram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "nodes", "edges"],
+      "properties": {
+        "type": { "const": "flow_diagram" },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "label", "kind"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "label": { "type": "string", "minLength": 1 },
+              "kind": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to"],
+            "properties": {
+              "from": { "type": "string", "minLength": 1 },
+              "to": { "type": "string", "minLength": 1 },
+              "label": { "type": "string" }
+            }
+          }
+        },
+        "lanes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "file_table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "rows"],
+      "properties": {
+        "type": { "const": "file_table" },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "kind", "role", "signatures"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "kind": { "enum": ["file", "dir"] },
+              "role": { "type": "string", "minLength": 1 },
+              "signatures": { "type": "array", "items": { "type": "string" } },
+              "gotcha": { "type": "string" },
+              "cite": { "$ref": "#/$defs/citation" }
+            }
+          }
+        }
+      }
+    },
+    "callouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items"],
+      "properties": {
+        "type": { "const": "callouts" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "title", "body"],
+            "properties": {
+              "kind": { "enum": ["seam", "hurt", "invariant", "contract"] },
+              "title": { "type": "string", "minLength": 1 },
+              "body": { "type": "array", "items": { "$ref": "#/$defs/inline" } }
+            }
+          }
+        }
+      }
+    },
+    "disclosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "heading", "children"],
+      "properties": {
+        "type": { "const": "disclosure" },
+        "heading": { "type": "string", "minLength": 1 },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/component" } }
+      }
+    },
+    "image_figure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "image_request"],
+      "properties": {
+        "type": { "const": "image_figure" },
+        "image_request": { "$ref": "#/$defs/image_request" }
+      }
+    },
+    "custom_html": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "title", "html"],
+      "properties": {
+        "type": { "const": "custom_html" },
+        "title": { "type": "string", "minLength": 1 },
+        "html": { "type": "string" },
+        "citations": { "type": "array", "items": { "$ref": "#/$defs/citation" } }
+      }
+    },
+    "component": {
+      "oneOf": [
+        { "$ref": "#/$defs/hero" },
+        { "$ref": "#/$defs/narrative" },
+        { "$ref": "#/$defs/flow_diagram" },
+        { "$ref": "#/$defs/file_table" },
+        { "$ref": "#/$defs/callouts" },
+        { "$ref": "#/$defs/disclosure" },
+        { "$ref": "#/$defs/image_figure" },
+        { "$ref": "#/$defs/custom_html" }
+      ]
+    },
+    "top_level_after_intro": {
+      "oneOf": [
+        { "$ref": "#/$defs/narrative" },
+        { "$ref": "#/$defs/flow_diagram" },
+        { "$ref": "#/$defs/file_table" },
+        { "$ref": "#/$defs/callouts" },
+        { "$ref": "#/$defs/disclosure" },
+        { "$ref": "#/$defs/image_figure" },
+        { "$ref": "#/$defs/custom_html" }
+      ]
+    }
+  }
+}
