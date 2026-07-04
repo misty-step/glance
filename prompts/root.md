@@ -42,16 +42,18 @@ code elements, headings, citation badges, or decorative text. Put it on the
 paragraph, list item, or table row whose factual sentence is directly supported
 by the cited source lines.
 
-Citation attributes are machine-checked before the page is written. Every
-comma-separated citation value must include the full path and line range,
-including citations carried forward from child pages.
+Citation attributes are machine-checked before the page is written. Use the
+canonical grammar `path:start-end[,start-end...]`: one repo-relative path,
+followed by one or more comma-separated ranges for that same path, including
+citations carried forward from child pages.
 
 GOOD:
 `<p class="glance-cited" data-glance-cite="README.md:1-3">The README defines the project purpose.</p>`
+`<p class="glance-cited" data-glance-cite="README.md:1-3,5-7">The README defines two linked facts.</p>`
 
 BAD:
 `<p class="glance-cited" data-glance-cite="1-3">The README defines the project purpose.</p>`
-`<p class="glance-cited" data-glance-cite="README.md:1-3,4-6">Two ranges share one path.</p>`
+`<p class="glance-cited" data-glance-cite="README.md:1-3,src/lib.rs:4-6">Two paths share one attribute.</p>`
 
 # Ancestor Constraints
 

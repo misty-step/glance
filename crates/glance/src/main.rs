@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
@@ -9,8 +9,8 @@ use glance_check::CitationChecker;
 use glance_core::{RegenerationPlan, SourcePin, leaf_to_root_dirs, snapshot_tree};
 use glance_gen::{
     GeneratedPage, GenerationConfig, GenerationRequest, MockProvider, PageGenerator, PageKind,
-    PageSpend, ProviderMode, RealPageGenerator, SpendReport, assemble_prompt_context,
-    spend_report_lines,
+    PageSpend, ProviderMode, RealPageGenerator, SpendReport, assemble_prompt_context_with_degraded,
+    normalize_generated_html_citations, spend_report_lines,
 };
 use glance_publish::{GhSisterHost, PublishRequest, SourceRepo};
 use serde::Deserialize;
@@ -179,15 +179,63 @@ fn run_command(
         ProviderMode::Mock => Box::new(MockProvider::with_routing(routing.clone())),
         ProviderMode::Real => Box::new(RealPageGenerator::from_env(generation)?),
     };
-    let mut spend_report = SpendReport::default();
     let existing_pages = match &site_root {
         Some(site_root) if site_root.exists() => load_existing_generated_pages(site_root)?,
         _ => BTreeMap::new(),
     };
-    let mut generated_pages = BTreeMap::new();
 
     println!("source_sha={source_sha}");
     println!("directories={}", snapshot.directories.len());
+    let outcome = run_generation(
+        &snapshot,
+        &source_sha,
+        site_root.as_deref(),
+        &routing,
+        &prompt,
+        provider.as_ref(),
+        &existing_pages,
+    )?;
+
+    for line in spend_report_lines(&outcome.spend_report) {
+        println!("{line}");
+    }
+
+    if !outcome.failures.is_empty() {
+        bail!(
+            "{} pages failed during generation; see run summary",
+            outcome.failures.len()
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunFailure {
+    directory: PathBuf,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunOutcome {
+    spend_report: SpendReport,
+    failures: Vec<RunFailure>,
+}
+
+fn run_generation(
+    snapshot: &glance_core::DirectorySnapshot,
+    source_sha: &str,
+    site_root: Option<&Path>,
+    routing: &glance_gen::DepthRouting,
+    prompt: &glance_gen::PromptConfig,
+    provider: &dyn PageGenerator,
+    existing_pages: &BTreeMap<PathBuf, String>,
+) -> Result<RunOutcome> {
+    let mut spend_report = SpendReport::default();
+    let mut generated_pages = BTreeMap::new();
+    let mut degraded_pages = BTreeSet::new();
+    let mut failures = Vec::new();
+
     for directory in leaf_to_root_dirs(snapshot.directories.keys().cloned()) {
         let kind = if directory == Path::new(".") {
             PageKind::Root
@@ -200,23 +248,43 @@ fn run_command(
             }
         };
         let route = routing.model_for(kind);
-        let prompt_context = assemble_prompt_context(
-            &snapshot,
+        let prompt_context = match assemble_prompt_context_with_degraded(
+            snapshot,
             &directory,
             kind,
             prompt.max_file_bytes,
             &generated_pages,
-            &existing_pages,
-        )?;
-        let page = provider.generate(
+            existing_pages,
+            &degraded_pages,
+        ) {
+            Ok(prompt_context) => prompt_context,
+            Err(error) => {
+                record_run_failure(&mut degraded_pages, &mut failures, &directory, error);
+                continue;
+            }
+        };
+        let mut page = match provider.generate(
             GenerationRequest::new(
                 snapshot.source_root.clone(),
                 directory.clone(),
-                source_sha.clone(),
+                source_sha.to_owned(),
                 kind,
             )
             .with_prompt_context(prompt_context),
-        )?;
+        ) {
+            Ok(page) => page,
+            Err(error) => {
+                record_run_failure(&mut degraded_pages, &mut failures, &directory, error);
+                continue;
+            }
+        };
+        match normalize_generated_html_citations(&page.html, &snapshot.source_root, &directory) {
+            Ok(html) => page.html = html,
+            Err(error) => {
+                record_run_failure(&mut degraded_pages, &mut failures, &directory, error);
+                continue;
+            }
+        }
         spend_report.record(PageSpend {
             directory: directory.clone(),
             provider: page.provider.clone(),
@@ -240,8 +308,12 @@ fn run_command(
         for note in &page.metadata_notes {
             println!("metadata_note={} {}", directory.display(), note);
         }
-        if let Some(site_root) = &site_root {
-            write_generated_page(site_root, &directory, &source_sha, kind, &page)?;
+        if let Some(site_root) = site_root {
+            if let Err(error) = write_generated_page(site_root, &directory, source_sha, kind, &page)
+            {
+                record_run_failure(&mut degraded_pages, &mut failures, &directory, error);
+                continue;
+            }
             println!(
                 "wrote_page={} {}",
                 directory.display(),
@@ -250,9 +322,59 @@ fn run_command(
         }
         generated_pages.insert(directory.clone(), page.html.clone());
     }
-    for line in spend_report_lines(&spend_report) {
-        println!("{line}");
+
+    if let Some(site_root) = site_root {
+        write_run_summary(site_root, source_sha, generated_pages.len(), &failures)?;
     }
+
+    for failure in &failures {
+        println!(
+            "run_failed_page={} error={}",
+            failure.directory.display(),
+            failure.message
+        );
+    }
+
+    Ok(RunOutcome {
+        spend_report,
+        failures,
+    })
+}
+
+fn record_run_failure<E: std::fmt::Display>(
+    degraded_pages: &mut BTreeSet<PathBuf>,
+    failures: &mut Vec<RunFailure>,
+    directory: &Path,
+    error: E,
+) {
+    degraded_pages.insert(directory.to_path_buf());
+    failures.push(RunFailure {
+        directory: directory.to_path_buf(),
+        message: error.to_string(),
+    });
+}
+
+fn write_run_summary(
+    site_root: &Path,
+    source_sha: &str,
+    pages_generated: usize,
+    failures: &[RunFailure],
+) -> Result<()> {
+    std::fs::create_dir_all(site_root)
+        .with_context(|| format!("create site root {}", site_root.display()))?;
+    let summary = json!({
+        "source_sha": source_sha,
+        "pages_generated": pages_generated,
+        "failed_pages": failures.iter().map(|failure| {
+            json!({
+                "directory": path_label(&failure.directory),
+                "message": failure.message,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    let summary = serde_json::to_string_pretty(&summary).context("serialize run summary")? + "\n";
+    std::fs::write(site_root.join("run-summary.json"), summary)
+        .with_context(|| format!("write {}", site_root.join("run-summary.json").display()))?;
     Ok(())
 }
 
@@ -331,6 +453,7 @@ fn write_generated_page(
         "output_tokens": page.output_tokens,
         "spend_micros": page.spend_micros,
         "metadata_notes": &page.metadata_notes,
+        "degraded_children": page.degraded_children.iter().map(|path| path_label(path)).collect::<Vec<_>>(),
     });
     let metadata = serde_json::to_string_pretty(&metadata).context("serialize metadata")? + "\n";
     std::fs::write(output_dir.join("metadata.json"), metadata)
@@ -697,6 +820,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_generation_continues_after_one_page_failure_and_records_degraded_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("source");
+        std::fs::create_dir(source.join("ok")).expect("ok");
+        std::fs::create_dir(source.join("bad")).expect("bad");
+        std::fs::write(source.join("README.md"), "# fixture\n").expect("readme");
+        std::fs::write(source.join("ok/lib.rs"), "pub fn ok() {}\n").expect("ok source");
+        std::fs::write(source.join("bad/lib.rs"), "pub fn bad() {}\n").expect("bad source");
+        let snapshot = snapshot_tree(&source, "fixture-sha").expect("snapshot");
+        let site = temp.path().join("site");
+        let provider = FailsOneDirectoryProvider {
+            failing_directory: PathBuf::from("bad"),
+        };
+        let existing_pages = BTreeMap::new();
+
+        let outcome = run_generation(
+            &snapshot,
+            "fixture-sha",
+            Some(&site),
+            &GenerationConfig::default().routing,
+            &GenerationConfig::default().prompt,
+            &provider,
+            &existing_pages,
+        )
+        .expect("run should complete with recorded failure");
+
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].directory, PathBuf::from("bad"));
+        assert!(site.join("ok/index.html").is_file());
+        assert!(!site.join("bad/index.html").exists());
+        assert!(site.join("index.html").is_file());
+        let root_metadata = std::fs::read_to_string(site.join("metadata.json"))
+            .expect("root metadata")
+            .parse::<serde_json::Value>()
+            .expect("metadata json");
+        assert_eq!(root_metadata["degraded_children"], json!(["bad"]));
+        let summary = std::fs::read_to_string(site.join("run-summary.json"))
+            .expect("summary")
+            .parse::<serde_json::Value>()
+            .expect("summary json");
+        assert_eq!(summary["failed_pages"][0]["directory"], "bad");
+    }
+
     #[cfg(unix)]
     #[test]
     fn html_scan_does_not_follow_symlinked_directories() {
@@ -714,5 +882,41 @@ mod tests {
             files,
             vec![site.path().join("index.html").canonicalize().unwrap()]
         );
+    }
+
+    struct FailsOneDirectoryProvider {
+        failing_directory: PathBuf,
+    }
+
+    impl PageGenerator for FailsOneDirectoryProvider {
+        fn generate(
+            &self,
+            request: GenerationRequest,
+        ) -> std::result::Result<GeneratedPage, glance_gen::GenerationError> {
+            if request.directory == self.failing_directory {
+                return Err(glance_gen::GenerationError::Provider {
+                    provider: "test",
+                    retryable: false,
+                    message: "planned failure".to_owned(),
+                });
+            }
+            let context = request.prompt_context.expect("prompt context");
+            let citation = context.primary_citation.as_deref().unwrap_or("README.md:1");
+            Ok(GeneratedPage {
+                html: format!(
+                    r#"<!doctype html><html><body><section class="glance-section" data-glance-section="what-this-is"><p class="glance-cited" data-glance-cite="{citation}">{}</p></section><section class="glance-section" data-glance-section="seams-contracts"><p class="glance-cited" data-glance-cite="{citation}">contracts</p></section><section class="glance-section" data-glance-section="where-it-can-hurt-you"><p class="glance-cited" data-glance-cite="{citation}">hurt</p></section></body></html>"#,
+                    request.directory.display()
+                ),
+                prompt_version: context.prompt_version,
+                tier: glance_gen::ModelTier::Cheap,
+                provider: "test".to_owned(),
+                model: "test".to_owned(),
+                input_tokens: 1,
+                output_tokens: 1,
+                spend_micros: 1,
+                metadata_notes: context.metadata_notes,
+                degraded_children: context.degraded_children,
+            })
+        }
     }
 }

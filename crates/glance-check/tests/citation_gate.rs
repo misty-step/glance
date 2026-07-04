@@ -19,11 +19,45 @@ fn parses_citation_spans_from_generated_html() {
 }
 
 #[test]
+fn parses_one_path_with_multiple_citation_ranges() {
+    let html = r#"<!doctype html><p data-glance-cite="src/lib.rs:1-2,3-3">split ranges</p>"#;
+
+    let citations = Citation::from_html(html).expect("citations");
+
+    assert_eq!(
+        citations,
+        vec![
+            Citation {
+                path: PathBuf::from("src/lib.rs"),
+                start_line: 1,
+                end_line: 2,
+            },
+            Citation {
+                path: PathBuf::from("src/lib.rs"),
+                start_line: 3,
+                end_line: 3,
+            },
+        ]
+    );
+}
+
+#[test]
 fn accepts_pages_whose_citations_exist_at_pinned_sha() {
     let (repo, sha) = committed_source_repo();
     let html = std::fs::read_to_string(fixture_dir().join("generated/good.html")).expect("html");
 
     let report = CitationChecker::new(repo.path(), sha).check_html(&html);
+
+    assert!(report.is_ok(), "{report:#?}");
+    assert_eq!(report.citations_checked, 2);
+}
+
+#[test]
+fn checks_each_range_from_one_path_multi_range_citation() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><p data-glance-cite="src/lib.rs:1-2,3-3">split ranges</p>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
 
     assert!(report.is_ok(), "{report:#?}");
     assert_eq!(report.citations_checked, 2);

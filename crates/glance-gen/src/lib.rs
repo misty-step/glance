@@ -96,6 +96,7 @@ pub struct GeneratedPage {
     pub output_tokens: u64,
     pub spend_micros: u64,
     pub metadata_notes: Vec<String>,
+    pub degraded_children: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,7 +145,10 @@ pub struct PageSpend {
 }
 
 mod context;
-pub use context::{PromptContext, assemble_prompt_context};
+pub use context::{
+    PromptContext, assemble_prompt_context, assemble_prompt_context_with_degraded,
+    normalize_generated_html_citations,
+};
 use context::{is_retryable_output_validation, validate_provider_output};
 
 #[derive(Debug, Error)]
@@ -243,6 +247,7 @@ impl PageGenerator for MockProvider {
             output_tokens: 0,
             spend_micros: 0,
             metadata_notes: prompt_context.metadata_notes,
+            degraded_children: prompt_context.degraded_children,
         })
     }
 }
@@ -566,8 +571,8 @@ impl PageGenerator for RealPageGenerator {
                 return Err(error);
             }
         };
-        let output = match validate_provider_output(&output) {
-            Ok(()) => output,
+        let output = match self.postprocess_output(output, &request) {
+            Ok(output) => output,
             Err(error) if is_retryable_output_validation(&error) => {
                 let prompt = prompt.with_retry_feedback(&error.to_string());
                 let retry_output = match self.client.generate_once(&prompt, route) {
@@ -577,11 +582,13 @@ impl PageGenerator for RealPageGenerator {
                         return Err(error);
                     }
                 };
-                if let Err(error) = validate_provider_output(&retry_output) {
-                    self.release_reservation(estimated_micros);
-                    return Err(error);
+                match self.postprocess_output(retry_output, &request) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        self.release_reservation(estimated_micros);
+                        return Err(error);
+                    }
                 }
-                retry_output
             }
             Err(error) => {
                 self.release_reservation(estimated_micros);
@@ -615,11 +622,26 @@ impl PageGenerator for RealPageGenerator {
             output_tokens: output.output_tokens,
             spend_micros,
             metadata_notes: prompt.metadata_notes,
+            degraded_children: prompt.degraded_children,
         })
     }
 }
 
 impl RealPageGenerator {
+    fn postprocess_output(
+        &self,
+        mut output: ProviderOutput,
+        request: &GenerationRequest,
+    ) -> Result<ProviderOutput, GenerationError> {
+        validate_provider_output(&output)?;
+        output.html = normalize_generated_html_citations(
+            &output.html,
+            &request.source_root,
+            &request.directory,
+        )?;
+        Ok(output)
+    }
+
     fn release_reservation(&self, estimated_micros: u64) {
         let mut budget = self.budget.lock().expect("budget mutex");
         budget.reserved_micros = budget.reserved_micros.saturating_sub(estimated_micros);
@@ -1185,6 +1207,7 @@ mod tests {
             estimated_input_tokens: 2,
             metadata_notes: Vec::new(),
             primary_citation: None,
+            degraded_children: Vec::new(),
         };
 
         let output = client
@@ -1228,6 +1251,7 @@ mod tests {
             estimated_input_tokens: 3,
             metadata_notes: Vec::new(),
             primary_citation: None,
+            degraded_children: Vec::new(),
         };
 
         let output = client
@@ -1271,6 +1295,7 @@ mod tests {
             estimated_input_tokens: 2,
             metadata_notes: Vec::new(),
             primary_citation: None,
+            degraded_children: Vec::new(),
         };
         let route = ModelRoute {
             provider: ProviderKind::Gemini,
@@ -1321,6 +1346,7 @@ mod tests {
             estimated_input_tokens: 3,
             metadata_notes: Vec::new(),
             primary_citation: None,
+            degraded_children: Vec::new(),
         };
         let route = ModelRoute {
             provider: ProviderKind::Gemini,
@@ -1371,6 +1397,7 @@ mod tests {
             estimated_input_tokens: 2,
             metadata_notes: Vec::new(),
             primary_citation: None,
+            degraded_children: Vec::new(),
         };
 
         let output = client
@@ -1417,6 +1444,7 @@ mod tests {
             estimated_input_tokens: 2,
             metadata_notes: Vec::new(),
             primary_citation: None,
+            degraded_children: Vec::new(),
         };
         let route = ModelRoute {
             provider: ProviderKind::Gemini,
@@ -1552,6 +1580,140 @@ mod tests {
         assert!(prompts[1].contains("Previous output was rejected"));
         assert!(prompts[1].contains("data-glance-cite"));
         assert_eq!(generator.spend_report().total_pages, 0);
+    }
+
+    #[test]
+    fn real_generator_accepts_one_path_with_multiple_citation_ranges() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("src")).expect("src");
+        std::fs::write(temp.path().join("src/lib.rs"), "one\ntwo\nthree\n").expect("fixture");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let html = r#"<!doctype html><html><body><p data-glance-cite="src/lib.rs:1-2,3-3">split cite</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let page = generator
+            .generate(
+                GenerationRequest::new(
+                    temp.path().to_path_buf(),
+                    PathBuf::from("."),
+                    "sha".to_owned(),
+                    PageKind::Root,
+                )
+                .with_prompt_context(PromptContext {
+                    prompt: "source prompt".to_owned(),
+                    prompt_version: "test-prompt".to_owned(),
+                    estimated_input_tokens: 1,
+                    metadata_notes: Vec::new(),
+                    primary_citation: None,
+                    degraded_children: Vec::new(),
+                }),
+            )
+            .expect("multi-range citation should be accepted");
+
+        assert!(
+            page.html
+                .contains(r#"data-glance-cite="src/lib.rs:1-2,3-3""#)
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn real_generator_normalizes_dir_relative_citation_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("src")).expect("src");
+        std::fs::write(temp.path().join("src/lib.rs"), "one\n").expect("fixture");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let html = r#"<!doctype html><html><body><p data-glance-cite="lib.rs:1">dir-relative cite</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            outputs: std::sync::Mutex::new(vec![Ok(provider_output(html, Some("stop"), Some(1)))]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let page = generator
+            .generate(
+                GenerationRequest::new(
+                    temp.path().to_path_buf(),
+                    PathBuf::from("src"),
+                    "sha".to_owned(),
+                    PageKind::Leaf,
+                )
+                .with_prompt_context(PromptContext {
+                    prompt: "source prompt".to_owned(),
+                    prompt_version: "test-prompt".to_owned(),
+                    estimated_input_tokens: 1,
+                    metadata_notes: Vec::new(),
+                    primary_citation: None,
+                    degraded_children: Vec::new(),
+                }),
+            )
+            .expect("dir-relative citation should normalize");
+
+        assert!(page.html.contains(r#"data-glance-cite="src/lib.rs:1""#));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn real_generator_retries_unresolvable_citation_paths_then_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("src")).expect("src");
+        std::fs::write(temp.path().join("src/lib.rs"), "one\n").expect("fixture");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let html = r#"<!doctype html><html><body><p data-glance-cite="missing.rs:1">missing cite</p></body></html>"#;
+        let provider = Box::new(ScriptedClient {
+            name: "scripted",
+            attempts: attempts.clone(),
+            prompts: prompts.clone(),
+            outputs: std::sync::Mutex::new(vec![
+                Ok(provider_output(html, Some("stop"), Some(1))),
+                Ok(provider_output(html, Some("stop"), Some(1))),
+            ]),
+        });
+        let generator = RealPageGenerator::new(generation_config_for_validation(), vec![provider]);
+
+        let error = generator
+            .generate(
+                GenerationRequest::new(
+                    temp.path().to_path_buf(),
+                    PathBuf::from("src"),
+                    "sha".to_owned(),
+                    PageKind::Leaf,
+                )
+                .with_prompt_context(PromptContext {
+                    prompt: "source prompt".to_owned(),
+                    prompt_version: "test-prompt".to_owned(),
+                    estimated_input_tokens: 1,
+                    metadata_notes: Vec::new(),
+                    primary_citation: None,
+                    degraded_children: Vec::new(),
+                }),
+            )
+            .expect_err("unresolvable citation must fail after retry");
+
+        assert!(matches!(error, GenerationError::InvalidHtml { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("unresolvable data-glance-cite path")
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            prompts
+                .lock()
+                .expect("prompts")
+                .last()
+                .expect("retry prompt")
+                .contains("Previous output was rejected")
+        );
     }
 
     #[test]
@@ -1762,6 +1924,7 @@ mod tests {
             estimated_input_tokens: 1,
             metadata_notes: Vec::new(),
             primary_citation: None,
+            degraded_children: Vec::new(),
         })
     }
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use glance_core::DirectorySnapshot;
@@ -13,6 +13,7 @@ pub struct PromptContext {
     pub estimated_input_tokens: u64,
     pub metadata_notes: Vec<String>,
     pub primary_citation: Option<String>,
+    pub degraded_children: Vec<PathBuf>,
 }
 
 impl PromptContext {
@@ -81,6 +82,7 @@ impl PromptContext {
             estimated_input_tokens: self.estimated_input_tokens,
             metadata_notes: self.metadata_notes.clone(),
             primary_citation: self.primary_citation.clone(),
+            degraded_children: self.degraded_children.clone(),
         }
     }
 }
@@ -93,18 +95,40 @@ pub fn assemble_prompt_context(
     generated_pages: &BTreeMap<PathBuf, String>,
     existing_pages: &BTreeMap<PathBuf, String>,
 ) -> Result<PromptContext, GenerationError> {
+    assemble_prompt_context_with_degraded(
+        snapshot,
+        directory,
+        kind,
+        max_file_bytes,
+        generated_pages,
+        existing_pages,
+        &BTreeSet::new(),
+    )
+}
+
+pub fn assemble_prompt_context_with_degraded(
+    snapshot: &DirectorySnapshot,
+    directory: &Path,
+    kind: PageKind,
+    max_file_bytes: usize,
+    generated_pages: &BTreeMap<PathBuf, String>,
+    existing_pages: &BTreeMap<PathBuf, String>,
+    degraded_pages: &BTreeSet<PathBuf>,
+) -> Result<PromptContext, GenerationError> {
     let directory = normalize_directory(directory);
     let template = PromptTemplate::for_kind(kind)?;
-    let mut packet = ContextPacket::new(snapshot, directory.clone(), kind);
+    let mut packet = ContextPacket::new(snapshot, directory.clone(), kind, degraded_pages);
     packet.add_tier_context(max_file_bytes, generated_pages, existing_pages)?;
     let context_packet = packet.render();
     let prompt = template.render(&context_packet, kind);
+    let degraded_children = packet.degraded_children();
     Ok(PromptContext {
         estimated_input_tokens: estimate_tokens(&prompt),
         prompt,
         prompt_version: template.version,
         metadata_notes: packet.metadata_notes,
         primary_citation: packet.primary_citation,
+        degraded_children,
     })
 }
 
@@ -191,17 +215,24 @@ struct ContextPacket<'a> {
     snapshot: &'a DirectorySnapshot,
     directory: PathBuf,
     kind: PageKind,
+    degraded_pages: &'a BTreeSet<PathBuf>,
     sections: Vec<String>,
     metadata_notes: Vec<String>,
     primary_citation: Option<String>,
 }
 
 impl<'a> ContextPacket<'a> {
-    fn new(snapshot: &'a DirectorySnapshot, directory: PathBuf, kind: PageKind) -> Self {
+    fn new(
+        snapshot: &'a DirectorySnapshot,
+        directory: PathBuf,
+        kind: PageKind,
+        degraded_pages: &'a BTreeSet<PathBuf>,
+    ) -> Self {
         Self {
             snapshot,
             directory,
             kind,
+            degraded_pages,
             sections: Vec::new(),
             metadata_notes: Vec::new(),
             primary_citation: None,
@@ -220,6 +251,7 @@ impl<'a> ContextPacket<'a> {
                 self.add_local_files_section(max_file_bytes, LocalFileMode::Direct)?;
                 self.add_parent_chain_section(generated_pages, existing_pages);
                 self.add_sibling_names_section();
+                self.add_degraded_children_section();
                 self.add_empty_directory_note();
             }
             PageKind::Interior => {
@@ -230,11 +262,13 @@ impl<'a> ContextPacket<'a> {
                     generated_pages,
                 )?;
                 self.add_parent_chain_section(generated_pages, existing_pages);
+                self.add_degraded_children_section();
                 self.add_empty_directory_note();
             }
             PageKind::Root | PageKind::CrossCutting => {
                 self.add_root_metadata_section(max_file_bytes)?;
                 self.add_child_pages_section(max_file_bytes, ChildPageMode::All, generated_pages)?;
+                self.add_degraded_children_section();
                 self.sections.push(
                     "## Root-only obligations\n- flows: trace 2-4 primary user or data flows across directories, each hop cited\n- data model: separate stored shapes from derived shapes\n- failure-edge index: deduplicate every child where-it-can-hurt-you section and cite it\n".to_owned(),
                 );
@@ -409,6 +443,10 @@ impl<'a> ContextPacket<'a> {
                             ));
                         }
                     }
+                    None if self.degraded_pages.contains(&child) => section.push_str(&format!(
+                        "- directory: {}\n  generated_page: degraded\n",
+                        path_display(&child)
+                    )),
                     None => section.push_str(&format!(
                         "- directory: {}\n  generated_page: missing\n",
                         path_display(&child)
@@ -418,6 +456,26 @@ impl<'a> ContextPacket<'a> {
         }
         self.sections.push(section);
         Ok(())
+    }
+
+    fn add_degraded_children_section(&mut self) {
+        let degraded = self.degraded_children();
+        if degraded.is_empty() {
+            return;
+        }
+        let mut section = String::from("## Degraded child pages\n");
+        for child in degraded {
+            section.push_str(&format!("- {}\n", path_display(&child)));
+        }
+        self.sections.push(section);
+    }
+
+    fn degraded_children(&self) -> Vec<PathBuf> {
+        self.degraded_pages
+            .iter()
+            .filter(|child| path_is_descendant_of(child, &self.directory))
+            .cloned()
+            .collect()
     }
 
     fn add_empty_directory_note(&mut self) {
@@ -600,14 +658,9 @@ fn extract_citations(document: &Html) -> Vec<String> {
     let mut citations = Vec::new();
     for element in document.select(&selector) {
         if let Some(raw) = element.value().attr("data-glance-cite") {
-            for citation in raw
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                if !citations.iter().any(|existing| existing == citation) {
-                    citations.push(citation.to_owned());
-                }
+            let citation = raw.trim();
+            if !citation.is_empty() && !citations.iter().any(|existing| existing == citation) {
+                citations.push(citation.to_owned());
             }
         }
     }
@@ -773,6 +826,16 @@ fn normalize_directory(path: &Path) -> PathBuf {
     }
 }
 
+fn path_is_descendant_of(path: &Path, ancestor: &Path) -> bool {
+    let path = normalize_directory(path);
+    let ancestor = normalize_directory(ancestor);
+    if ancestor == Path::new(".") {
+        path != Path::new(".")
+    } else {
+        path != ancestor && path.starts_with(ancestor)
+    }
+}
+
 fn path_display(path: &Path) -> String {
     if path == Path::new(".") {
         ".".to_owned()
@@ -867,48 +930,178 @@ fn validate_citation_attributes(html: &str) -> Result<(), GenerationError> {
         })?;
     for element in document.select(&selector) {
         if let Some(raw) = element.value().attr("data-glance-cite") {
-            for citation in raw
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                validate_citation_grammar(citation)?;
-            }
+            validate_citation_grammar(raw)?;
         }
     }
     Ok(())
 }
 
-fn validate_citation_grammar(citation: &str) -> Result<(), GenerationError> {
-    let Some((path, range)) = citation.rsplit_once(':') else {
+pub fn normalize_generated_html_citations(
+    html: &str,
+    source_root: &Path,
+    directory: &Path,
+) -> Result<String, GenerationError> {
+    let mut normalized = String::with_capacity(html.len());
+    let mut cursor = 0;
+    while let Some(offset) = html[cursor..].find("data-glance-cite") {
+        let attr_start = cursor + offset;
+        let Some((value_start, value_end)) = citation_attribute_value_bounds(html, attr_start)
+        else {
+            normalized.push_str(&html[cursor..attr_start + "data-glance-cite".len()]);
+            cursor = attr_start + "data-glance-cite".len();
+            continue;
+        };
+        normalized.push_str(&html[cursor..value_start]);
+        let raw = &html[value_start..value_end];
+        normalized.push_str(&normalize_citation_attribute(raw, source_root, directory)?);
+        cursor = value_end;
+    }
+    normalized.push_str(&html[cursor..]);
+    Ok(normalized)
+}
+
+fn citation_attribute_value_bounds(html: &str, attr_start: usize) -> Option<(usize, usize)> {
+    let bytes = html.as_bytes();
+    let mut index = attr_start + "data-glance-cite".len();
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'=') {
+        return None;
+    }
+    index += 1;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    let quote = *bytes.get(index)?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let value_start = index + 1;
+    let value_end = html[value_start..]
+        .bytes()
+        .position(|byte| byte == quote)
+        .map(|offset| value_start + offset)?;
+    Some((value_start, value_end))
+}
+
+fn normalize_citation_attribute(
+    raw: &str,
+    source_root: &Path,
+    directory: &Path,
+) -> Result<String, GenerationError> {
+    let parsed = parse_citation_attribute(raw)?;
+    let path = resolve_citation_path(&parsed.path, source_root, directory)?;
+    Ok(format!(
+        "{}:{}",
+        path_display(&path),
+        parsed.ranges.join(",")
+    ))
+}
+
+struct CitationAttribute {
+    path: PathBuf,
+    ranges: Vec<String>,
+}
+
+fn parse_citation_attribute(raw: &str) -> Result<CitationAttribute, GenerationError> {
+    let citation = raw.trim();
+    let Some((path, ranges)) = citation.rsplit_once(':') else {
         return invalid_citation(citation);
     };
+    let path = parse_citation_path(citation, path)?;
+    let ranges = ranges
+        .split(',')
+        .map(str::trim)
+        .filter(|range| !range.is_empty())
+        .map(|range| {
+            validate_citation_range(citation, range)?;
+            Ok(range.to_owned())
+        })
+        .collect::<Result<Vec<_>, GenerationError>>()?;
+    if ranges.is_empty() {
+        return invalid_citation(citation);
+    }
+    Ok(CitationAttribute { path, ranges })
+}
+
+fn parse_citation_path(raw: &str, path: &str) -> Result<PathBuf, GenerationError> {
     if path.trim().is_empty()
         || path.chars().any(char::is_whitespace)
         || path.starts_with('/')
-        || path.contains("..")
+        || path.contains([':', ','])
     {
-        return invalid_citation(citation);
+        return invalid_citation(raw);
     }
+    let path = Path::new(path);
+    let mut cleaned = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => cleaned.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return invalid_citation(raw),
+        }
+    }
+    if cleaned.as_os_str().is_empty() {
+        return invalid_citation(raw);
+    }
+    Ok(cleaned)
+}
+
+fn validate_citation_grammar(citation: &str) -> Result<(), GenerationError> {
+    parse_citation_attribute(citation).map(|_| ())
+}
+
+fn validate_citation_range(raw: &str, range: &str) -> Result<(), GenerationError> {
     let (start, end) = match range.split_once('-') {
         Some((start, end)) => (start, end),
         None => (range, range),
     };
     let Ok(start) = start.parse::<u64>() else {
-        return invalid_citation(citation);
+        return invalid_citation(raw);
     };
     let Ok(end) = end.parse::<u64>() else {
-        return invalid_citation(citation);
+        return invalid_citation(raw);
     };
     if start == 0 || end < start {
-        return invalid_citation(citation);
+        return invalid_citation(raw);
     }
     Ok(())
 }
 
-fn invalid_citation(citation: &str) -> Result<(), GenerationError> {
+fn invalid_citation<T>(citation: &str) -> Result<T, GenerationError> {
     Err(GenerationError::InvalidHtml {
-        message: format!("invalid data-glance-cite {citation:?}: expected path:start[-end]"),
+        message: format!(
+            "invalid data-glance-cite {citation:?}: expected path:start[-end][,start[-end]...]"
+        ),
+    })
+}
+
+fn resolve_citation_path(
+    path: &Path,
+    source_root: &Path,
+    directory: &Path,
+) -> Result<PathBuf, GenerationError> {
+    if source_root.join(path).is_file() {
+        return Ok(path.to_path_buf());
+    }
+
+    let directory = normalize_directory(directory);
+    if directory != Path::new(".") {
+        let candidate = directory.join(path);
+        if source_root.join(&candidate).is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(GenerationError::InvalidHtml {
+        message: format!(
+            "unresolvable data-glance-cite path {:?}: expected repo-relative path or path relative to page directory {}",
+            path_display(path),
+            path_display(&directory)
+        ),
     })
 }
 

@@ -43,15 +43,17 @@ headings, citation badges, or decorative text. Put it on the paragraph, list
 item, or table row whose factual sentence is directly supported by the cited
 source lines.
 
-Citation attributes are machine-checked before the page is written. Every
-comma-separated citation value must include the full path and line range.
+Citation attributes are machine-checked before the page is written. Use the
+canonical grammar `path:start-end[,start-end...]`: one repo-relative path,
+followed by one or more comma-separated ranges for that same path.
 
 GOOD:
 `<p class="glance-cited" data-glance-cite="docs/guide.md:1-3">The guide defines the directory rule.</p>`
+`<p class="glance-cited" data-glance-cite="docs/guide.md:1-3,5-6">The guide defines two linked rules.</p>`
 
 BAD:
 `<p class="glance-cited" data-glance-cite="1-3">The guide defines the directory rule.</p>`
-`<p class="glance-cited" data-glance-cite="docs/guide.md:1-3,4-6">Two ranges share one path.</p>`
+`<p class="glance-cited" data-glance-cite="docs/guide.md:1-3,docs/other.md:4-6">Two paths share one attribute.</p>`
 
 # Ancestor Constraints
 
