@@ -5,17 +5,17 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use glance_check::CitationChecker;
+use glance_check::{Citation, CitationChecker, validate_navigation, validate_page_contract};
 use glance_core::{RegenerationPlan, SourcePin, leaf_to_root_dirs, snapshot_tree};
 use glance_gen::{
-    GeminiImageProvider, GeneratedPage, GenerationConfig, GenerationRequest, ImageBudget,
-    ImageOutput, ImageProvider, ImageProviderKind, ImageRequest, MockImageProvider, MockProvider,
-    PageGenerator, PageKind, PageSpend, ProviderMode, RealPageGenerator, SpendReport,
-    assemble_prompt_context_with_degraded, normalize_generated_html_citations,
-    render_image_requests, spend_report_lines,
+    ContextBlockMetadata, GeminiImageProvider, GeneratedPage, GenerationConfig, GenerationRequest,
+    ImageBudget, ImageOutput, ImageProvider, ImageProviderKind, ImageRenderReport, ImageRequest,
+    MockImageProvider, MockProvider, PageGenerator, PageKind, PageSpend, ProviderMode,
+    RealPageGenerator, SpendReport, assemble_prompt_context_with_degraded,
+    normalize_generated_html_citations, render_image_requests, spend_report_lines,
 };
 use glance_publish::{GhSisterHost, PublishRequest, SourceRepo};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 #[derive(Debug, Parser)]
@@ -228,6 +228,46 @@ struct RunOutcome {
     failures: Vec<RunFailure>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RunPageManifest {
+    directory: String,
+    kind: &'static str,
+    provider: String,
+    model: String,
+    params: RunPageParams,
+    prompt_version: String,
+    catalog_version: String,
+    context_blocks: Vec<RunContextBlock>,
+    input_tokens: u64,
+    output_tokens: u64,
+    spend_micros: u64,
+    image: RunImageManifest,
+    retries: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RunPageParams {
+    max_tokens: u32,
+    temperature: Option<String>,
+    output_contract: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RunContextBlock {
+    name: String,
+    byte_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+struct RunImageManifest {
+    requested: usize,
+    rendered: usize,
+    failed: usize,
+    skipped: usize,
+    spend_micros: u64,
+    files: Vec<String>,
+}
+
 struct RunGenerationInput<'a> {
     snapshot: &'a glance_core::DirectorySnapshot,
     source_sha: &'a str,
@@ -256,6 +296,7 @@ fn run_generation(input: RunGenerationInput<'_>) -> Result<RunOutcome> {
     let mut generated_pages = BTreeMap::new();
     let mut degraded_pages = BTreeSet::new();
     let mut failures = Vec::new();
+    let mut page_manifests = Vec::new();
     let mut image_budget = ImageBudget::new(image.budget_per_run);
 
     for directory in leaf_to_root_dirs(snapshot.directories.keys().cloned()) {
@@ -307,6 +348,10 @@ fn run_generation(input: RunGenerationInput<'_>) -> Result<RunOutcome> {
                 continue;
             }
         }
+        if let Err(error) = validate_rendered_page_before_write(snapshot, &page.html) {
+            record_run_failure(&mut degraded_pages, &mut failures, &directory, error);
+            continue;
+        }
         spend_report.record(PageSpend {
             directory: directory.clone(),
             provider: page.provider.clone(),
@@ -330,6 +375,7 @@ fn run_generation(input: RunGenerationInput<'_>) -> Result<RunOutcome> {
         for note in &page.metadata_notes {
             println!("metadata_note={} {}", directory.display(), note);
         }
+        let mut image_manifest = RunImageManifest::default();
         if let Some(site_root) = site_root {
             let output_dir = page_output_dir(site_root, &directory);
             let image_report = render_image_requests(
@@ -339,6 +385,7 @@ fn run_generation(input: RunGenerationInput<'_>) -> Result<RunOutcome> {
                 image_provider,
                 &mut image_budget,
             );
+            image_manifest = run_image_manifest(&image_report, &output_dir);
             page.html = image_report.html;
             if image_report.requested > 0 {
                 println!(
@@ -365,11 +412,24 @@ fn run_generation(input: RunGenerationInput<'_>) -> Result<RunOutcome> {
                 page_output_dir(site_root, &directory).display()
             );
         }
+        page_manifests.push(run_page_manifest(
+            &directory,
+            kind,
+            route.max_tokens,
+            &page,
+            image_manifest,
+        ));
         generated_pages.insert(directory.clone(), page.html.clone());
     }
 
     if let Some(site_root) = site_root {
-        write_run_summary(site_root, source_sha, generated_pages.len(), &failures)?;
+        write_run_summary(
+            site_root,
+            source_sha,
+            generated_pages.len(),
+            &failures,
+            &page_manifests,
+        )?;
     }
 
     for failure in &failures {
@@ -439,12 +499,14 @@ fn write_run_summary(
     source_sha: &str,
     pages_generated: usize,
     failures: &[RunFailure],
+    pages: &[RunPageManifest],
 ) -> Result<()> {
     std::fs::create_dir_all(site_root)
         .with_context(|| format!("create site root {}", site_root.display()))?;
     let summary = json!({
         "source_sha": source_sha,
         "pages_generated": pages_generated,
+        "pages": pages,
         "failed_pages": failures.iter().map(|failure| {
             json!({
                 "directory": path_label(&failure.directory),
@@ -455,6 +517,119 @@ fn write_run_summary(
     let summary = serde_json::to_string_pretty(&summary).context("serialize run summary")? + "\n";
     std::fs::write(site_root.join("run-summary.json"), summary)
         .with_context(|| format!("write {}", site_root.join("run-summary.json").display()))?;
+    Ok(())
+}
+
+fn run_page_manifest(
+    directory: &Path,
+    kind: PageKind,
+    max_tokens: u32,
+    page: &GeneratedPage,
+    image: RunImageManifest,
+) -> RunPageManifest {
+    RunPageManifest {
+        directory: path_label(directory),
+        kind: page_kind_label(kind),
+        provider: page.provider.clone(),
+        model: page.model.clone(),
+        params: RunPageParams {
+            max_tokens,
+            temperature: None,
+            output_contract: "json_object/glance-catalog-001",
+        },
+        prompt_version: page.prompt_version.clone(),
+        catalog_version: page.catalog_version.clone(),
+        context_blocks: context_block_manifest(&page.context_blocks),
+        input_tokens: page.input_tokens,
+        output_tokens: page.output_tokens,
+        spend_micros: page.spend_micros,
+        image,
+        retries: page.retries,
+    }
+}
+
+fn context_block_manifest(blocks: &[ContextBlockMetadata]) -> Vec<RunContextBlock> {
+    blocks
+        .iter()
+        .map(|block| RunContextBlock {
+            name: block.name.clone(),
+            byte_size: block.byte_size,
+        })
+        .collect()
+}
+
+fn run_image_manifest(report: &ImageRenderReport, output_dir: &Path) -> RunImageManifest {
+    RunImageManifest {
+        requested: report.requested,
+        rendered: report.rendered,
+        failed: report.failed,
+        skipped: report.skipped,
+        spend_micros: report.spend_micros,
+        files: report
+            .files
+            .iter()
+            .map(|file| {
+                file.strip_prefix(output_dir)
+                    .unwrap_or(file.as_path())
+                    .display()
+                    .to_string()
+            })
+            .collect(),
+    }
+}
+
+fn validate_rendered_page_before_write(
+    snapshot: &glance_core::DirectorySnapshot,
+    html: &str,
+) -> Result<()> {
+    let mut failures = Vec::new();
+
+    for failure in validate_navigation(html, snapshot) {
+        failures.push(format!(
+            "navigation {}: {}",
+            failure.directory.display(),
+            failure.message
+        ));
+    }
+    for failure in validate_page_contract(html) {
+        failures.push(format!("page contract: {}", failure.message));
+    }
+    match Citation::from_html(html) {
+        Ok(citations) => {
+            for citation in citations {
+                if let Err(error) = validate_live_citation_range(snapshot, &citation) {
+                    failures.push(error);
+                }
+            }
+        }
+        Err(error) => failures.push(error.to_string()),
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "rendered page failed pre-write validation: {}",
+            failures.join("; ")
+        )
+    }
+}
+
+fn validate_live_citation_range(
+    snapshot: &glance_core::DirectorySnapshot,
+    citation: &Citation,
+) -> std::result::Result<(), String> {
+    let path = snapshot.source_root.join(&citation.path);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| format!("{}: {error}", citation.path.display()))?;
+    let line_count = content.lines().count();
+    if citation.end_line > line_count {
+        return Err(format!(
+            "{} has {line_count} lines, citation asks for line {}",
+            citation.path.display(),
+            citation.end_line
+        ));
+    }
     Ok(())
 }
 
@@ -526,12 +701,15 @@ fn write_generated_page(
         "directory": path_label(directory),
         "kind": page_kind_label(kind),
         "prompt_version": &page.prompt_version,
+        "catalog_version": &page.catalog_version,
         "provider": &page.provider,
         "model": &page.model,
         "tier": format!("{:?}", page.tier),
         "input_tokens": page.input_tokens,
         "output_tokens": page.output_tokens,
         "spend_micros": page.spend_micros,
+        "retries": page.retries,
+        "context_blocks": context_block_manifest(&page.context_blocks),
         "metadata_notes": &page.metadata_notes,
         "degraded_children": page.degraded_children.iter().map(|path| path_label(path)).collect::<Vec<_>>(),
     });
@@ -965,6 +1143,55 @@ mod tests {
             .parse::<serde_json::Value>()
             .expect("summary json");
         assert_eq!(summary["failed_pages"][0]["directory"], "bad");
+        let pages = summary["pages"].as_array().expect("pages manifest");
+        assert!(pages.iter().any(|page| {
+            page["directory"] == "ok"
+                && page["catalog_version"] == glance_gen::CATALOG_VERSION
+                && page["params"]["max_tokens"].as_u64() == Some(6_000)
+                && page["context_blocks"]
+                    .as_array()
+                    .is_some_and(|blocks| !blocks.is_empty())
+        }));
+    }
+
+    #[test]
+    fn run_generation_rejects_out_of_range_citations_before_writing_page() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("source");
+        std::fs::write(source.join("README.md"), "# fixture\n").expect("readme");
+        let snapshot = snapshot_tree(&source, "fixture-sha").expect("snapshot");
+        let site = temp.path().join("site");
+        let config = GenerationConfig::default();
+        let provider = OutOfRangeCitationProvider;
+        let existing_pages = BTreeMap::new();
+
+        let outcome = run_generation(RunGenerationInput {
+            snapshot: &snapshot,
+            source_sha: "fixture-sha",
+            site_root: Some(&site),
+            routing: &config.routing,
+            prompt: &config.prompt,
+            image: &config.image,
+            provider: &provider,
+            image_provider: &MockImageProvider,
+            existing_pages: &existing_pages,
+        })
+        .expect("run records validation failure");
+
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(
+            outcome.failures[0]
+                .message
+                .contains("README.md has 1 lines")
+        );
+        assert!(!site.join("index.html").exists());
+        let summary = std::fs::read_to_string(site.join("run-summary.json"))
+            .expect("summary")
+            .parse::<serde_json::Value>()
+            .expect("summary json");
+        assert_eq!(summary["pages_generated"], 0);
+        assert_eq!(summary["failed_pages"][0]["directory"], ".");
     }
 
     #[test]
@@ -1011,6 +1238,18 @@ mod tests {
         assert!(root_html.contains("data-theme-choice=\"system\""));
         assert!(root_html.contains(r#"<img src="glance-image-001.png""#));
         assert!(site.path().join("glance-image-001.png").is_file());
+
+        let summary = std::fs::read_to_string(site.path().join("run-summary.json"))
+            .expect("summary")
+            .parse::<serde_json::Value>()
+            .expect("summary json");
+        let root_page = summary["pages"]
+            .as_array()
+            .expect("pages")
+            .iter()
+            .find(|page| page["directory"] == ".")
+            .expect("root page");
+        assert_eq!(root_page["image"]["spend_micros"], 0);
     }
 
     #[cfg(unix)]
@@ -1048,23 +1287,20 @@ mod tests {
                     message: "planned failure".to_owned(),
                 });
             }
-            let context = request.prompt_context.expect("prompt context");
-            let citation = context.primary_citation.as_deref().unwrap_or("README.md:1");
-            Ok(GeneratedPage {
-                html: format!(
-                    r#"<!doctype html><html><body><section class="glance-section" data-glance-section="what-this-is"><p class="glance-cited" data-glance-cite="{citation}">{}</p></section><section class="glance-section" data-glance-section="seams-contracts"><p class="glance-cited" data-glance-cite="{citation}">contracts</p></section><section class="glance-section" data-glance-section="where-it-can-hurt-you"><p class="glance-cited" data-glance-cite="{citation}">hurt</p></section></body></html>"#,
-                    request.directory.display()
-                ),
-                prompt_version: context.prompt_version,
-                tier: glance_gen::ModelTier::Cheap,
-                provider: "test".to_owned(),
-                model: "test".to_owned(),
-                input_tokens: 1,
-                output_tokens: 1,
-                spend_micros: 1,
-                metadata_notes: context.metadata_notes,
-                degraded_children: context.degraded_children,
-            })
+            MockProvider::default().generate(request)
+        }
+    }
+
+    struct OutOfRangeCitationProvider;
+
+    impl PageGenerator for OutOfRangeCitationProvider {
+        fn generate(
+            &self,
+            request: GenerationRequest,
+        ) -> std::result::Result<GeneratedPage, glance_gen::GenerationError> {
+            let mut page = MockProvider::default().generate(request)?;
+            page.html = page.html.replace("README.md:1-1", "README.md:1-99");
+            Ok(page)
         }
     }
 }

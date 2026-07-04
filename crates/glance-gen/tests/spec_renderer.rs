@@ -6,6 +6,7 @@ use glance_gen::{
     FlowDiagram, FlowEdge, FlowNode, Hero, InlineNode, Narrative, PageKind, PageSpec,
     RenderContext, StatChip, render_page_spec,
 };
+use serde_json::json;
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../glance-core/tests/fixtures/mini-source")
@@ -179,6 +180,77 @@ fn spec_validation_recurses_into_disclosure_children() {
         .expect_err("invalid nested citation is rejected");
 
     assert!(error.to_string().contains("invalid citation"));
+}
+
+#[test]
+fn spec_validation_rejects_non_root_hero_image_request() {
+    let mut spec = fixture_spec();
+    let Some(Component::Hero(hero)) = spec.components.first_mut() else {
+        panic!("fixture keeps hero first");
+    };
+    hero.image_request = Some(glance_gen::ImageRequestSpec {
+        intent: "Show the interior shape.".to_owned(),
+        emphasis: Vec::new(),
+    });
+
+    let error = spec
+        .validate_for_kind(PageKind::Interior)
+        .expect_err("interior hero image request is rejected");
+
+    assert!(error.to_string().contains("root pages"));
+}
+
+#[test]
+fn spec_runtime_deserialize_rejects_unknown_and_missing_required_fields() {
+    let mut unknown_field = serde_json::to_value(fixture_spec()).expect("fixture json");
+    unknown_field
+        .as_object_mut()
+        .expect("page object")
+        .insert("model_notes".to_owned(), json!("not in the catalog"));
+    assert!(
+        serde_json::from_value::<PageSpec>(unknown_field).is_err(),
+        "provider-only fields must not survive runtime parsing"
+    );
+
+    let mut missing_signatures = serde_json::to_value(fixture_spec()).expect("fixture json");
+    missing_signatures["components"][4]["rows"][0]
+        .as_object_mut()
+        .expect("file row object")
+        .remove("signatures");
+    assert!(
+        serde_json::from_value::<PageSpec>(missing_signatures).is_err(),
+        "file_table rows must provide signatures explicitly"
+    );
+
+    let mut missing_disclosure_children =
+        serde_json::to_value(fixture_spec()).expect("fixture json");
+    missing_disclosure_children["components"][5]
+        .as_object_mut()
+        .expect("disclosure object")
+        .remove("children");
+    assert!(
+        serde_json::from_value::<PageSpec>(missing_disclosure_children).is_err(),
+        "disclosures must provide children explicitly"
+    );
+}
+
+#[test]
+fn spec_validation_rejects_empty_file_table_roles() {
+    let mut spec = fixture_spec();
+    let Some(Component::FileTable(table)) = spec
+        .components
+        .iter_mut()
+        .find(|component| matches!(component, Component::FileTable(_)))
+    else {
+        panic!("fixture includes file table");
+    };
+    table.rows[0].role.clear();
+
+    let error = spec
+        .validate_for_kind(PageKind::Root)
+        .expect_err("empty roles are rejected");
+
+    assert!(error.to_string().contains("role"));
 }
 
 fn fixture_spec() -> PageSpec {

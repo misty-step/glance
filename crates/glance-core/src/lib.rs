@@ -37,7 +37,10 @@ pub struct WalkOptions {
 impl Default for WalkOptions {
     fn default() -> Self {
         Self {
-            ignored_dir_names: [".git", "target"].into_iter().map(str::to_owned).collect(),
+            ignored_dir_names: [".git", "target", "glance-site-out"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             ignored_relative_dirs: [PathBuf::from("tests/fixtures/live-sample")]
                 .into_iter()
                 .collect(),

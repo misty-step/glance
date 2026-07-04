@@ -57,6 +57,7 @@ pub struct ImageOutput {
     pub mime_type: String,
     pub provider: String,
     pub model: String,
+    pub spend_micros: u64,
 }
 
 pub trait ImageProvider: Send + Sync {
@@ -78,6 +79,7 @@ impl ImageProvider for MockImageProvider {
             mime_type: "image/png".to_owned(),
             provider: "mock-image".to_owned(),
             model: request.model.clone(),
+            spend_micros: 0,
         })
     }
 }
@@ -164,6 +166,7 @@ pub struct ImageRenderReport {
     pub rendered: usize,
     pub failed: usize,
     pub skipped: usize,
+    pub spend_micros: u64,
     pub files: Vec<PathBuf>,
     pub messages: Vec<String>,
 }
@@ -181,6 +184,7 @@ pub fn render_image_requests(
     let mut rendered = 0;
     let mut failed = 0;
     let mut skipped = 0;
+    let mut spend_micros = 0u64;
     let mut files = Vec::new();
     let mut messages = Vec::new();
 
@@ -227,6 +231,7 @@ pub fn render_image_requests(
         };
         match provider.render(&request) {
             Ok(output) => {
+                spend_micros = spend_micros.saturating_add(output.spend_micros);
                 let extension = extension_for_mime(&output.mime_type);
                 let filename = format!("glance-image-{requested:03}.{extension}");
                 let path = output_dir.join(&filename);
@@ -265,6 +270,7 @@ pub fn render_image_requests(
         rendered,
         failed,
         skipped,
+        spend_micros,
         files,
         messages,
     }
@@ -352,6 +358,7 @@ fn image_output_from_value(
         mime_type,
         provider: "gemini-image".to_owned(),
         model: model.to_owned(),
+        spend_micros: 0,
     })
 }
 
