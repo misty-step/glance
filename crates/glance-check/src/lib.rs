@@ -131,15 +131,23 @@ pub struct NavigationFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageContractFailure {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckReport {
     pub citations_checked: usize,
     pub failures: Vec<CitationFailure>,
     pub navigation_failures: Vec<NavigationFailure>,
+    pub page_contract_failures: Vec<PageContractFailure>,
 }
 
 impl CheckReport {
     pub fn is_ok(&self) -> bool {
-        self.failures.is_empty() && self.navigation_failures.is_empty()
+        self.failures.is_empty()
+            && self.navigation_failures.is_empty()
+            && self.page_contract_failures.is_empty()
     }
 }
 
@@ -172,6 +180,7 @@ impl CitationChecker {
                         message: error.to_string(),
                     }],
                     navigation_failures: Vec::new(),
+                    page_contract_failures: Vec::new(),
                 };
             }
         };
@@ -186,11 +195,13 @@ impl CitationChecker {
             }
         }
         let navigation_failures = self.check_navigation(html);
+        let page_contract_failures = validate_page_contract(html);
 
         CheckReport {
             citations_checked: citations.len(),
             failures,
             navigation_failures,
+            page_contract_failures,
         }
     }
 
@@ -325,6 +336,186 @@ pub fn validate_navigation(html: &str, snapshot: &DirectorySnapshot) -> Vec<Navi
     }
 
     failures
+}
+
+pub fn validate_page_contract(html: &str) -> Vec<PageContractFailure> {
+    let document = Html::parse_document(html);
+    let catalog_selector = match Selector::parse("[data-glance-catalog-version]") {
+        Ok(selector) => selector,
+        Err(error) => {
+            return vec![PageContractFailure {
+                message: error.to_string(),
+            }];
+        }
+    };
+    if document.select(&catalog_selector).next().is_none() {
+        return Vec::new();
+    }
+
+    let mut failures = Vec::new();
+    let component_selector = match Selector::parse(".glance-main > [data-glance-component]") {
+        Ok(selector) => selector,
+        Err(error) => {
+            return vec![PageContractFailure {
+                message: error.to_string(),
+            }];
+        }
+    };
+    let mut components = document
+        .select(&component_selector)
+        .filter_map(|element| element.value().attr("data-glance-component"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        let fallback_selector = match Selector::parse("[data-glance-component]") {
+            Ok(selector) => selector,
+            Err(error) => {
+                return vec![PageContractFailure {
+                    message: error.to_string(),
+                }];
+            }
+        };
+        components = document
+            .select(&fallback_selector)
+            .filter_map(|element| element.value().attr("data-glance-component"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+    }
+
+    if components.first().map(String::as_str) != Some("hero") {
+        failures.push(PageContractFailure {
+            message: "catalog page must start with hero".to_owned(),
+        });
+    }
+    if !matches!(
+        components.get(1).map(String::as_str),
+        Some("narrative" | "flow_diagram")
+    ) {
+        failures.push(PageContractFailure {
+            message: "catalog page must put narrative or flow_diagram immediately after hero"
+                .to_owned(),
+        });
+    }
+    let file_table_index = components
+        .iter()
+        .position(|component| component == "file_table");
+    if components
+        .iter()
+        .filter(|component| component.as_str() == "file_table")
+        .count()
+        > 1
+    {
+        failures.push(PageContractFailure {
+            message: "catalog page may include only one file_table".to_owned(),
+        });
+    }
+    let story_index = components.iter().position(|component| {
+        matches!(
+            component.as_str(),
+            "narrative" | "flow_diagram" | "callouts" | "image_figure" | "custom_html"
+        )
+    });
+    match (story_index, file_table_index) {
+        (_, None) => failures.push(PageContractFailure {
+            message: "catalog page must include file_table".to_owned(),
+        }),
+        (Some(story), Some(table)) if story < table => {}
+        _ => failures.push(PageContractFailure {
+            message: "catalog page must put narrative or flow content before file_table".to_owned(),
+        }),
+    }
+
+    let mut seen_disclosure = false;
+    let mut seen_file_table = false;
+    for component in &components {
+        if seen_disclosure && component != "disclosure" {
+            failures.push(PageContractFailure {
+                message: "disclosure components must be last".to_owned(),
+            });
+            break;
+        }
+        if seen_file_table && component != "disclosure" {
+            failures.push(PageContractFailure {
+                message: "file_table must follow all story components and precede disclosures"
+                    .to_owned(),
+            });
+            break;
+        }
+        if component == "disclosure" {
+            seen_disclosure = true;
+        }
+        if component == "file_table" {
+            seen_file_table = true;
+        }
+    }
+
+    let body_text = document.root_element().text().collect::<Vec<_>>().join(" ");
+    if contains_visible_bracket_citation(&body_text)
+        || iframe_srcdoc_has_visible_bracket_citation(&document)
+    {
+        failures.push(PageContractFailure {
+            message: "visible bracket citation noise is forbidden".to_owned(),
+        });
+    }
+
+    failures
+}
+
+fn contains_visible_bracket_citation(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'[' {
+            index += 1;
+            continue;
+        }
+        let Some(end) = text[index + 1..].find(']').map(|offset| index + 1 + offset) else {
+            return false;
+        };
+        let inside = &text[index + 1..end];
+        if looks_like_bracket_citation(inside) {
+            return true;
+        }
+        index = end + 1;
+    }
+    false
+}
+
+fn looks_like_bracket_citation(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    let Some((path, ranges)) = candidate.rsplit_once(':') else {
+        return false;
+    };
+    if path.trim().is_empty() || ranges.trim().is_empty() || path.chars().any(char::is_whitespace) {
+        return false;
+    }
+    ranges
+        .split(',')
+        .all(|range| valid_bracket_citation_range(range.trim()))
+}
+
+fn valid_bracket_citation_range(range: &str) -> bool {
+    let Some((start, end)) = range.split_once('-') else {
+        return range.chars().all(|character| character.is_ascii_digit()) && !range.is_empty();
+    };
+    !start.is_empty()
+        && !end.is_empty()
+        && start.chars().all(|character| character.is_ascii_digit())
+        && end.chars().all(|character| character.is_ascii_digit())
+}
+
+fn iframe_srcdoc_has_visible_bracket_citation(document: &Html) -> bool {
+    let Ok(selector) = Selector::parse("iframe[srcdoc]") else {
+        return false;
+    };
+    document.select(&selector).any(|iframe| {
+        let Some(srcdoc) = iframe.value().attr("srcdoc") else {
+            return false;
+        };
+        let fragment = Html::parse_fragment(srcdoc);
+        let text = fragment.root_element().text().collect::<Vec<_>>().join(" ");
+        contains_visible_bracket_citation(&text)
+    })
 }
 
 fn page_directory(document: &Html) -> std::result::Result<PathBuf, String> {

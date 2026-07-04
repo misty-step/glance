@@ -133,6 +133,93 @@ fn rejects_generated_pages_missing_child_navigation() {
 }
 
 #[test]
+fn accepts_catalog_pages_with_progressive_disclosure_order() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><html data-glance-catalog-version="glance-catalog-001"><body class="glance-page" data-glance-directory=".">
+<nav class="glance-nav"><a href="src/index.html">src</a></nav>
+<section data-glance-component="hero"><a data-glance-cite="README.md:1-3">fixture repository</a></section>
+<section data-glance-component="narrative"><p>Story first.</p></section>
+<section data-glance-component="file_table"><table><tr><td>src/lib.rs</td></tr></table></section>
+<details data-glance-component="disclosure"><summary>Full context</summary></details>
+</body></html>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+
+    assert!(report.is_ok(), "{report:#?}");
+    assert_eq!(report.page_contract_failures.len(), 0);
+}
+
+#[test]
+fn rejects_catalog_pages_with_bracket_citation_noise_or_bad_order() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><html data-glance-catalog-version="glance-catalog-001"><body class="glance-page" data-glance-directory=".">
+<nav class="glance-nav"><a href="src/index.html">src</a></nav>
+<section data-glance-component="hero"><p data-glance-cite="README.md:1-3">Fixture [README.md:1-3]</p></section>
+<details data-glance-component="disclosure"><summary>Full context</summary></details>
+<section data-glance-component="file_table"><table><tr><td>src/lib.rs</td></tr></table></section>
+</body></html>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+
+    assert!(!report.is_ok());
+    assert!(
+        report
+            .page_contract_failures
+            .iter()
+            .any(|failure| failure.message.contains("visible bracket citation"))
+    );
+    assert!(
+        report
+            .page_contract_failures
+            .iter()
+            .any(|failure| failure.message.contains("disclosure"))
+    );
+}
+
+#[test]
+fn rejects_catalog_pages_with_extensionless_bracket_citation_noise() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><html data-glance-catalog-version="glance-catalog-001"><body class="glance-page" data-glance-directory=".">
+<nav class="glance-nav"><a href="src/index.html">src</a></nav>
+<section data-glance-component="hero"><p data-glance-cite="README.md:1-3">Fixture [Makefile:1-3]</p></section>
+<section data-glance-component="narrative"><p>Story first.</p></section>
+<section data-glance-component="file_table"><table><tr><td>src/lib.rs</td></tr></table></section>
+</body></html>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+
+    assert!(!report.is_ok());
+    assert!(
+        report
+            .page_contract_failures
+            .iter()
+            .any(|failure| failure.message.contains("visible bracket citation"))
+    );
+}
+
+#[test]
+fn rejects_catalog_pages_with_srcdoc_bracket_citation_noise() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><html data-glance-catalog-version="glance-catalog-001"><body class="glance-page" data-glance-directory=".">
+<nav class="glance-nav"><a href="src/index.html">src</a></nav>
+<section data-glance-component="hero"><p data-glance-cite="README.md:1-3">Fixture repository</p></section>
+<section data-glance-component="narrative"><p>Story first.</p></section>
+<section data-glance-component="custom_html"><iframe srcdoc="<p>[src/lib.rs:1-4]</p>"></iframe></section>
+<section data-glance-component="file_table"><table><tr><td>src/lib.rs</td></tr></table></section>
+</body></html>"#;
+
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+
+    assert!(!report.is_ok());
+    assert!(
+        report
+            .page_contract_failures
+            .iter()
+            .any(|failure| failure.message.contains("visible bracket citation"))
+    );
+}
+
+#[test]
 fn checks_each_range_from_one_path_multi_range_citation() {
     let (repo, sha) = committed_source_repo();
     let html = r#"<!doctype html><html><body class="glance-page" data-glance-directory="."><nav class="glance-nav"><a href="src/index.html">src</a></nav><p data-glance-cite="src/lib.rs:1-2,3-3">split ranges</p></body></html>"#;

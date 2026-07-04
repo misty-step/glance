@@ -148,10 +148,17 @@ pub use context::{
     normalize_generated_html_citations,
 };
 mod images;
+mod spec;
 use context::{is_retryable_output_validation, validate_provider_output};
 pub use images::{
     GeminiImageProvider, ImageBudget, ImageConfig, ImageOutput, ImageProvider, ImageProviderKind,
     ImageRenderReport, ImageRequest, MockImageProvider, render_image_requests,
+};
+pub use spec::{
+    CATALOG_PROMPT_MD, CATALOG_SCHEMA_JSON, CATALOG_VERSION, Callout, CalloutKind, Callouts,
+    CitationRef, Component, CustomHtml, Disclosure, FileRow, FileRowKind, FileTable, FlowDiagram,
+    FlowEdge, FlowNode, Hero, ImageFigure, ImageRequestSpec, InlineNode, Narrative, PageSpec,
+    RenderContext, SpecError, StatChip, render_page_spec,
 };
 
 #[derive(Debug, Error)]
@@ -176,6 +183,8 @@ pub enum GenerationError {
     PromptTemplate { path: &'static str, message: String },
     #[error("provider returned non-html output: {message}")]
     InvalidHtml { message: String },
+    #[error("page spec is invalid: {message}")]
+    InvalidSpec { message: String },
     #[error("http transport failed: {0}")]
     Http(String),
     #[error("io error at {path}: {source}")]
@@ -221,45 +230,19 @@ impl PageGenerator for MockProvider {
             })?;
         let tier = self.router.tier_for(request.kind);
         let route = self.routing.model_for(request.kind);
-        let directory = request.directory.display();
-        let citation = prompt_context.primary_citation.as_deref();
-        let cited_attr = citation
-            .map(|citation| format!(r#" class="glance-cited" data-glance-cite="{citation}""#))
-            .unwrap_or_default();
-        let directory_attr = path_label(&request.directory);
-        let nav = mock_navigation(&snapshot, &request.directory);
-        let composition = mock_composition(&snapshot, &request.directory, cited_attr.as_str());
-        let root_extras = if matches!(request.kind, PageKind::Root | PageKind::CrossCutting) {
-            r##"<figure class="glance-image-request" data-glance-image-prompt="Create a clean architectural hero illustration for this repository: source tree rooms becoming linked Glance HTML pages, with citation rails and navigation paths. No decorative clutter." data-glance-image-alt="Architecture illustration of source directories becoming linked Glance pages"></figure>
-<svg class="glance-diagram" viewBox="0 0 420 120" role="img" aria-label="Animated source to page flow">
-  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z"></path></marker></defs>
-  <path d="M40 60 H380" stroke="currentColor" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
-  <circle r="7" fill="currentColor"><animateMotion dur="4s" repeatCount="indefinite" path="M40 60 H360"></animateMotion></circle>
-  <text x="36" y="35">source</text><text x="174" y="35">citations</text><text x="318" y="35">site</text>
-</svg>"##
-        } else {
-            ""
-        };
-        let cross_cutting = if matches!(request.kind, PageKind::Root | PageKind::CrossCutting) {
-            format!(
-                r#"<section class="glance-section glance-cross-cutting" data-glance-section="flows"><h2 class="glance-section-title">Flows</h2><p{cited_attr}>Mock flow across generated context.</p></section>
-<section class="glance-section glance-cross-cutting" data-glance-section="data-model"><h2 class="glance-section-title">Data model</h2><p{cited_attr}>Mock data model distinguishes stored source from generated pages.</p></section>
-<section class="glance-section glance-cross-cutting" data-glance-section="failure-edge-index"><h2 class="glance-section-title">Failure-edge index</h2><p{cited_attr}>Mock failure index carries child sharp edges.</p></section>"#
-            )
-        } else {
-            String::new()
-        };
+        let spec = mock_page_spec(&snapshot, &request, &prompt_context);
+        let html = render_page_spec(
+            &spec,
+            &RenderContext {
+                snapshot: &snapshot,
+                directory: &request.directory,
+                source_sha: &request.source_sha,
+                prompt_version: &prompt_context.prompt_version,
+                kind: request.kind,
+            },
+        )?;
         Ok(GeneratedPage {
-            html: format!(
-                r#"<!doctype html><html data-source-sha="{}" data-prompt-version="{}"><head><meta charset="utf-8"><title>Glance {directory}</title><style>:root{{color-scheme:light dark;--glance-bg:#f7f5ef;--glance-text:#171614;--glance-line:#d8d2c4;--glance-accent:#2457d6}}@media (prefers-color-scheme:dark){{:root{{--glance-bg:#111316;--glance-text:#f1efe7;--glance-line:#343941;--glance-accent:#9ab3ff}}}}[data-theme="light"]{{--glance-bg:#f7f5ef;--glance-text:#171614;--glance-line:#d8d2c4;--glance-accent:#2457d6}}[data-theme="dark"]{{--glance-bg:#111316;--glance-text:#f1efe7;--glance-line:#343941;--glance-accent:#9ab3ff}}body{{background:var(--glance-bg);color:var(--glance-text)}}a{{color:var(--glance-accent)}}.glance-image-request{{border:1px solid var(--glance-line);padding:1rem}}</style><script>try{{let t=localStorage.getItem('glance-theme');if(t)document.documentElement.dataset.theme=t}}catch(e){{}}</script></head><body class="glance-page" data-glance-directory="{directory_attr}"><header class="glance-header"><h1>{directory}</h1><div class="glance-theme"><button data-theme-choice="light">light</button><button data-theme-choice="dark">dark</button><button data-theme-choice="auto">auto</button></div>{nav}</header><main>
-<section class="glance-section" data-glance-section="what-this-is"><h2 class="glance-section-title">What this is</h2><p{cited_attr}>Mock glance page for {directory}.</p></section>
-<section class="glance-section" data-glance-section="role-in-the-whole"><h2 class="glance-section-title">Role in the whole</h2><p{cited_attr}>Mock role in the repository.</p></section>
-<section class="glance-section" data-glance-section="composition"><h2 class="glance-section-title">Composition</h2><div class="glance-composition">{composition}</div></section>
-<section class="glance-section" data-glance-section="seams-contracts"><h2 class="glance-section-title">Seams and contracts</h2><p{cited_attr}>Mock seam section.</p></section>
-<section class="glance-section" data-glance-section="where-it-can-hurt-you"><h2 class="glance-section-title">Where it can hurt you</h2><p{cited_attr}>Nothing sharp found.</p></section>
-{cross_cutting}{root_extras}</main><script>document.querySelectorAll('[data-theme-choice]').forEach((button)=>button.addEventListener('click',()=>{{let value=button.dataset.themeChoice;if(value==='auto'){{localStorage.removeItem('glance-theme');delete document.documentElement.dataset.theme}}else{{localStorage.setItem('glance-theme',value);document.documentElement.dataset.theme=value}}}}));</script></body></html>"#,
-                request.source_sha, prompt_context.prompt_version
-            ),
+            html,
             prompt_version: prompt_context.prompt_version,
             tier,
             provider: "mock".to_owned(),
@@ -273,128 +256,224 @@ impl PageGenerator for MockProvider {
     }
 }
 
-fn mock_navigation(snapshot: &glance_core::DirectorySnapshot, directory: &Path) -> String {
-    let mut html = String::from(r#"<nav class="glance-nav" aria-label="Glance navigation">"#);
-    html.push_str(r#"<div class="glance-breadcrumb">"#);
-    for crumb in breadcrumb_dirs(directory) {
-        html.push_str(&format!(
-            r#"<a href="{}">{}</a>"#,
-            html_escape(&glance_check::directory_href(directory, &crumb)),
-            html_escape(&path_label(&crumb))
-        ));
-    }
-    html.push_str("</div>");
+fn mock_page_spec(
+    snapshot: &glance_core::DirectorySnapshot,
+    request: &GenerationRequest,
+    prompt_context: &PromptContext,
+) -> PageSpec {
+    let directory = path_label(&request.directory);
+    let title = if request.directory == Path::new(".") {
+        repo_name(&request.source_root)
+    } else {
+        directory.clone()
+    };
+    let citation = prompt_context.primary_citation.as_deref();
+    let summary = cited_sentence(
+        format!("This Glance page explains {directory} from the supplied source context."),
+        citation,
+    );
+    let record = snapshot.directory(&request.directory);
+    let file_count = record.map(|record| record.files.len()).unwrap_or(0);
+    let child_count = record.map(|record| record.child_dirs.len()).unwrap_or(0);
+    let mut components = vec![
+        Component::Hero(Hero {
+            title: title.clone(),
+            summary,
+            stats: vec![
+                StatChip {
+                    label: "files".to_owned(),
+                    value: file_count.to_string(),
+                },
+                StatChip {
+                    label: "children".to_owned(),
+                    value: child_count.to_string(),
+                },
+                StatChip {
+                    label: "tier".to_owned(),
+                    value: page_kind_label(request.kind).to_owned(),
+                },
+            ],
+            image_request: if matches!(request.kind, PageKind::Root | PageKind::CrossCutting) {
+                Some(ImageRequestSpec {
+                    intent:
+                        "Architecture overview of source directories becoming cited Glance pages"
+                            .to_owned(),
+                    emphasis: vec![
+                        "source tree".to_owned(),
+                        "citation gate".to_owned(),
+                        "generated site".to_owned(),
+                    ],
+                })
+            } else {
+                None
+            },
+        }),
+        Component::Narrative(Narrative {
+            heading: "At 10,000 feet".to_owned(),
+            paragraphs: vec![cited_sentence(
+                format!(
+                    "{directory} is rendered as a progressively disclosed room with citations woven into the prose."
+                ),
+                citation,
+            )],
+        }),
+    ];
 
-    if directory != Path::new(".") {
-        let parent = parent_directory(directory);
-        html.push_str(&format!(
-            r#"<a class="glance-parent-link" href="{}">Parent</a>"#,
-            html_escape(&glance_check::directory_href(directory, &parent))
-        ));
+    if child_count > 0 || matches!(request.kind, PageKind::Root | PageKind::CrossCutting) {
+        components.push(Component::FlowDiagram(mock_flow(
+            snapshot,
+            &request.directory,
+        )));
     }
+    components.push(Component::Callouts(Callouts {
+        items: vec![
+            Callout {
+                kind: CalloutKind::Seam,
+                title: "Navigation is deterministic".to_owned(),
+                body: cited_sentence(
+                    "Parent, child, sibling, and breadcrumb links come from the source plan."
+                        .to_owned(),
+                    citation,
+                ),
+            },
+            Callout {
+                kind: CalloutKind::Hurt,
+                title: "Citation drift fails closed".to_owned(),
+                body: cited_sentence(
+                    "A page with a broken cited line range fails deterministic checking."
+                        .to_owned(),
+                    citation,
+                ),
+            },
+        ],
+    }));
+    components.push(Component::FileTable(mock_file_table(
+        snapshot,
+        &request.directory,
+        citation,
+    )));
+    components.push(Component::Disclosure(Disclosure {
+        heading: "Full context".to_owned(),
+        children: vec![Component::Narrative(Narrative {
+            heading: "Prompt packet".to_owned(),
+            paragraphs: vec![vec![InlineNode::Text {
+                text: "The full prompt context is retained for lower-priority inspection instead of leading the page."
+                    .to_owned(),
+            }]],
+        })],
+    }));
 
+    PageSpec {
+        catalog_version: CATALOG_VERSION.to_owned(),
+        title,
+        components,
+    }
+}
+
+fn mock_flow(snapshot: &glance_core::DirectorySnapshot, directory: &Path) -> FlowDiagram {
     let children = snapshot
         .directory(directory)
         .map(|record| record.child_dirs.clone())
         .unwrap_or_default();
-    if !children.is_empty() {
-        html.push_str(r#"<div class="glance-nav-children">"#);
-        for child in children {
-            html.push_str(&format!(
-                r#"<a href="{}">{}</a>"#,
-                html_escape(&glance_check::directory_href(directory, &child)),
-                html_escape(&path_label(&child))
-            ));
+    let mut nodes = vec![FlowNode {
+        id: "source".to_owned(),
+        label: path_label(directory),
+        kind: "source".to_owned(),
+    }];
+    let mut edges = Vec::new();
+    if children.is_empty() {
+        nodes.push(FlowNode {
+            id: "site".to_owned(),
+            label: "generated site".to_owned(),
+            kind: "html".to_owned(),
+        });
+        edges.push(FlowEdge {
+            from: "source".to_owned(),
+            to: "site".to_owned(),
+            label: Some("renders".to_owned()),
+        });
+    } else {
+        for (index, child) in children.iter().take(5).enumerate() {
+            let id = format!("child-{index}");
+            nodes.push(FlowNode {
+                id: id.clone(),
+                label: path_label(child),
+                kind: "dir".to_owned(),
+            });
+            edges.push(FlowEdge {
+                from: "source".to_owned(),
+                to: id,
+                label: Some("contains".to_owned()),
+            });
         }
-        html.push_str("</div>");
     }
-
-    let siblings = sibling_dirs(snapshot, directory);
-    if !siblings.is_empty() {
-        html.push_str(r#"<div class="glance-nav-siblings">"#);
-        for sibling in siblings {
-            html.push_str(&format!(
-                r#"<a href="{}">{}</a>"#,
-                html_escape(&glance_check::directory_href(directory, &sibling)),
-                html_escape(&path_label(&sibling))
-            ));
-        }
-        html.push_str("</div>");
+    FlowDiagram {
+        nodes,
+        edges,
+        lanes: Vec::new(),
     }
-
-    html.push_str("</nav>");
-    html
 }
 
-fn mock_composition(
+fn mock_file_table(
     snapshot: &glance_core::DirectorySnapshot,
     directory: &Path,
-    cited_attr: &str,
-) -> String {
-    let children = snapshot
-        .directory(directory)
-        .map(|record| record.child_dirs.clone())
-        .unwrap_or_default();
-    if children.is_empty() {
-        return format!(r#"<p{cited_attr}>No child directories.</p>"#);
+    citation: Option<&str>,
+) -> FileTable {
+    let Some(record) = snapshot.directory(directory) else {
+        return FileTable { rows: Vec::new() };
+    };
+    let cite = citation.and_then(citation_ref_from_raw);
+    let mut rows = Vec::new();
+    for child in &record.child_dirs {
+        rows.push(FileRow {
+            name: path_label(child),
+            kind: FileRowKind::Dir,
+            role: "Child room in this source tree.".to_owned(),
+            signatures: Vec::new(),
+            gotcha: None,
+            cite: None,
+        });
     }
-
-    let mut html = String::new();
-    for child in children {
-        html.push_str(&format!(
-            r#"<article class="glance-child"><a class="glance-child-link" href="{}">{}</a><p class="glance-child-role">Mock child role for {}.</p></article>"#,
-            html_escape(&glance_check::directory_href(directory, &child)),
-            html_escape(&path_label(&child)),
-            html_escape(&path_label(&child))
-        ));
+    for file in &record.files {
+        rows.push(FileRow {
+            name: path_label(file),
+            kind: FileRowKind::File,
+            role: "Local file included in this room.".to_owned(),
+            signatures: Vec::new(),
+            gotcha: None,
+            cite: cite.clone(),
+        });
     }
-    html
+    if rows.is_empty() {
+        rows.push(FileRow {
+            name: path_label(directory),
+            kind: FileRowKind::Dir,
+            role: "Empty source room.".to_owned(),
+            signatures: Vec::new(),
+            gotcha: Some("No local files or child directories.".to_owned()),
+            cite: None,
+        });
+    }
+    FileTable { rows }
 }
 
-fn breadcrumb_dirs(directory: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from(".")];
-    if directory == Path::new(".") {
-        return dirs;
+fn cited_sentence(text: String, citation: Option<&str>) -> Vec<InlineNode> {
+    match citation.and_then(citation_ref_from_raw) {
+        Some(citation) => vec![InlineNode::Cite {
+            text,
+            path: citation.path,
+            lines: citation.lines,
+        }],
+        None => vec![InlineNode::Text { text }],
     }
-    let mut current = PathBuf::new();
-    for component in directory.components() {
-        if let std::path::Component::Normal(part) = component {
-            current.push(part);
-            dirs.push(current.clone());
-        }
-    }
-    dirs
 }
 
-fn parent_directory(directory: &Path) -> PathBuf {
-    directory
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn sibling_dirs(snapshot: &glance_core::DirectorySnapshot, directory: &Path) -> Vec<PathBuf> {
-    if directory == Path::new(".") {
-        return Vec::new();
-    }
-    let parent = directory
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut siblings = snapshot
-        .directory(parent)
-        .map(|record| {
-            record
-                .child_dirs
-                .iter()
-                .filter(|child| child.as_path() != directory)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    siblings.sort();
-    siblings
+fn citation_ref_from_raw(raw: &str) -> Option<CitationRef> {
+    let (path, lines) = raw.rsplit_once(':')?;
+    Some(CitationRef {
+        path: path.to_owned(),
+        lines: lines.to_owned(),
+    })
 }
 
 fn path_label(path: &Path) -> String {
@@ -408,6 +487,22 @@ fn path_label(path: &Path) -> String {
             })
             .collect::<Vec<_>>()
             .join("/")
+    }
+}
+
+fn repo_name(source_root: &Path) -> String {
+    source_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| source_root.display().to_string())
+}
+
+fn page_kind_label(kind: PageKind) -> &'static str {
+    match kind {
+        PageKind::Leaf => "leaf",
+        PageKind::Interior => "interior",
+        PageKind::Root | PageKind::CrossCutting => "root",
     }
 }
 

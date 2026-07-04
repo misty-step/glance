@@ -648,12 +648,14 @@ fn check_command(
     let mut total_citations = 0;
     let mut total_failures = 0;
     let mut total_navigation_failures = 0;
+    let mut total_page_contract_failures = 0;
 
     for html_file in html_files {
         let report = checker.check_html_file(&html_file)?;
         total_citations += report.citations_checked;
         total_failures += report.failures.len();
         total_navigation_failures += report.navigation_failures.len();
+        total_page_contract_failures += report.page_contract_failures.len();
         if report.is_ok() {
             println!(
                 "ok {} citations={}",
@@ -661,11 +663,13 @@ fn check_command(
                 report.citations_checked
             );
         } else {
+            let page_failures = report.failures.len()
+                + report.navigation_failures.len()
+                + report.page_contract_failures.len();
             println!(
-                "fail {} citations={} failures={}",
+                "fail {} citations={} failures={page_failures}",
                 html_file.display(),
-                report.citations_checked,
-                report.failures.len()
+                report.citations_checked
             );
             for failure in report.failures {
                 println!(
@@ -683,13 +687,16 @@ fn check_command(
                     failure.message
                 );
             }
+            for failure in report.page_contract_failures {
+                println!("  page_contract {}", failure.message);
+            }
         }
     }
 
-    if total_failures > 0 || total_navigation_failures > 0 {
+    if total_failures > 0 || total_navigation_failures > 0 || total_page_contract_failures > 0 {
         bail!(
-            "{} validation failures across {total_citations} checked citations (citation_failures={total_failures}, navigation_failures={total_navigation_failures})",
-            total_failures + total_navigation_failures
+            "{} validation failures across {total_citations} checked citations (citation_failures={total_failures}, navigation_failures={total_navigation_failures}, page_contract_failures={total_page_contract_failures})",
+            total_failures + total_navigation_failures + total_page_contract_failures
         );
     }
 
@@ -999,8 +1006,9 @@ mod tests {
             std::fs::read_to_string(site.path().join("src/parser/index.html")).expect("parser");
         assert!(parser_html.contains(r#"href="../index.html""#));
 
-        assert!(root_html.contains("glance-diagram"));
-        assert!(root_html.contains("data-theme-choice=\"auto\""));
+        assert!(root_html.contains("glance-flow-diagram"));
+        assert!(root_html.contains("data-glance-catalog-version=\"glance-catalog-001\""));
+        assert!(root_html.contains("data-theme-choice=\"system\""));
         assert!(root_html.contains(r#"<img src="glance-image-001.png""#));
         assert!(site.path().join("glance-image-001.png").is_file());
     }
