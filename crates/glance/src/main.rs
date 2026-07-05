@@ -1236,8 +1236,12 @@ mod tests {
         assert!(root_html.contains("glance-flow-diagram"));
         assert!(root_html.contains("data-glance-catalog-version=\"glance-catalog-001\""));
         assert!(root_html.contains("data-theme-choice=\"system\""));
-        assert!(root_html.contains(r#"<img src="glance-image-001.png""#));
-        assert!(site.path().join("glance-image-001.png").is_file());
+        // Mock mode has no real image to show: MockImageProvider's output is
+        // deliberately too small to pass `image_meets_minimum_dimensions`, so
+        // the root page keeps the honest fallback figure, never a fake <img>.
+        assert!(root_html.contains("glance-image-fallback"));
+        assert!(!root_html.contains("<img "));
+        assert!(!site.path().join("glance-image-001.png").exists());
 
         let summary = std::fs::read_to_string(site.path().join("run-summary.json"))
             .expect("summary")

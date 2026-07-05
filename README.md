@@ -53,11 +53,15 @@ Rust composes the final prompt from the real source inventory, declared flow
 edges, and the house style suffix documented in `docs/images.md`.
 
 When a run writes a site directory, `glance-gen` renders up to
-`generation.image.budget_per_run` requests beside their pages. Mock runs write a
-deterministic PNG. Real runs use Gemini image generation via `GEMINI_API_KEY`
-and the Interactions API endpoint configured in `generation.image`, defaulting
-to `gemini-3.1-flash-lite-image`. Render failure keeps a styled fallback figure
-with alt text and never emits a broken `<img>`.
+`generation.image.budget_per_run` requests beside their pages. Real runs use
+Gemini image generation via `GEMINI_API_KEY` and the Interactions API endpoint
+configured in `generation.image`, defaulting to `gemini-3.1-flash-lite-image`.
+Mock runs have no real image to show, so they always keep the styled fallback
+figure. Any provider result below `MIN_IMAGE_DIMENSION_PX` in either axis
+(a signature some providers use for a blocked or failed generation) is
+treated the same way. Render failure or a rejected result keeps a styled
+fallback figure with alt text and never emits a broken or degenerate
+`<img>` stretched into a giant flat-color rectangle.
 
 ## Gate
 

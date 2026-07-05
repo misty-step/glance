@@ -42,6 +42,15 @@ pub enum ImageProviderKind {
     GptImage2,
 }
 
+/// A provider-returned image below this width or height in either axis cannot
+/// be a real diagram or illustration (Gemini's configured 16:9 requests come
+/// back in the hundreds of pixels per side at minimum) — it is a degenerate
+/// placeholder: a 1x1 pixel a provider used to signal a blocked or failed
+/// generation, a mock stand-in, or similar. The CSS scales `<img>` to fill the
+/// figure regardless of source resolution, so a tiny source renders as a
+/// giant flat-color rectangle — that must never ship.
+const MIN_IMAGE_DIMENSION_PX: u32 = 256;
+
 #[derive(Debug, Clone)]
 pub struct ImageRequest {
     pub prompt: String,
@@ -70,11 +79,16 @@ pub struct MockImageProvider;
 impl ImageProvider for MockImageProvider {
     fn render(&self, request: &ImageRequest) -> Result<ImageOutput, GenerationError> {
         Ok(ImageOutput {
+            // Deliberately a small swatch, well under MIN_IMAGE_DIMENSION_PX: mock mode
+            // has no real image to show, so `render_image_requests` rejects this as
+            // degenerate and renders the styled fallback figure instead of a fake
+            // <img>. Mock runs must never present placeholder content as finished work.
             bytes: vec![
-                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
-                1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248,
-                207, 192, 240, 31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68,
-                174, 66, 96, 130,
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 32, 0, 0, 0,
+                32, 8, 6, 0, 0, 0, 115, 122, 122, 244, 0, 0, 0, 47, 73, 68, 65, 84, 120, 218, 237,
+                206, 33, 1, 0, 0, 8, 3, 176, 167, 121, 255, 64, 116, 129, 24, 152, 137, 249, 101,
+                218, 253, 20, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 129, 239, 192, 1, 15, 131,
+                156, 121, 171, 8, 154, 30, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
             ],
             mime_type: "image/png".to_owned(),
             provider: "mock-image".to_owned(),
@@ -230,6 +244,12 @@ pub fn render_image_requests(
             image_size: config.image_size.clone(),
         };
         match provider.render(&request) {
+            Ok(output) if !image_meets_minimum_dimensions(&output) => {
+                failed += 1;
+                let reason = "generated image is too small to be a real asset (provider likely returned a placeholder)".to_owned();
+                messages.push(format!("failed image request {requested}: {reason}"));
+                rendered_html.push_str(&fallback_figure(&prompt, &alt, &reason));
+            }
             Ok(output) => {
                 spend_micros = spend_micros.saturating_add(output.spend_micros);
                 let extension = extension_for_mime(&output.mime_type);
@@ -424,6 +444,30 @@ fn html_unescape(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Rejects only images we can positively prove are degenerate. PNG carries an
+/// explicit width/height in its header, so we check it; formats we don't
+/// parse here fall open (assumed fine) rather than blocking a real asset on
+/// a format we can't inspect.
+fn image_meets_minimum_dimensions(output: &ImageOutput) -> bool {
+    match png_dimensions(&output.bytes) {
+        Some((width, height)) => {
+            width >= MIN_IMAGE_DIMENSION_PX && height >= MIN_IMAGE_DIMENSION_PX
+        }
+        None => true,
+    }
+}
+
+/// Reads the width/height out of a PNG's IHDR chunk without decoding pixels.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+    if bytes.len() < 24 || bytes[..8] != SIGNATURE || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((width, height))
+}
+
 fn extension_for_mime(mime_type: &str) -> &'static str {
     match mime_type {
         "image/jpeg" => "jpg",
@@ -440,7 +484,35 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn mock_provider_renders_requested_figure_beside_page() {
+    fn successful_provider_renders_requested_figure_beside_page() {
+        let output_dir = tempfile::tempdir().expect("output");
+        let mut budget = ImageBudget::new(1);
+        let html = r#"<!doctype html><figure data-glance-image-prompt="draw the map" data-glance-image-alt="Map"></figure>"#;
+
+        let report = render_image_requests(
+            html,
+            output_dir.path(),
+            &ImageConfig::default(),
+            &RealisticImageProvider,
+            &mut budget,
+        );
+
+        assert_eq!(report.requested, 1);
+        assert_eq!(report.rendered, 1);
+        assert!(
+            report
+                .html
+                .contains(r#"<img src="glance-image-001.png" alt="Map">"#)
+        );
+        assert!(output_dir.path().join("glance-image-001.png").is_file());
+    }
+
+    #[test]
+    fn mock_image_provider_always_falls_back_never_ships_placeholder() {
+        // Regression for the cairn pilot defect: MockImageProvider is the
+        // provider mock run mode actually wires up, and its output shipped as
+        // a giant flat-color rectangle. Mock mode has no real image to show,
+        // so it must always take the fallback path, never a fake <img>.
         let output_dir = tempfile::tempdir().expect("output");
         let mut budget = ImageBudget::new(1);
         let html = r#"<!doctype html><figure data-glance-image-prompt="draw the map" data-glance-image-alt="Map"></figure>"#;
@@ -453,14 +525,10 @@ mod tests {
             &mut budget,
         );
 
-        assert_eq!(report.requested, 1);
-        assert_eq!(report.rendered, 1);
-        assert!(
-            report
-                .html
-                .contains(r#"<img src="glance-image-001.png" alt="Map">"#)
-        );
-        assert!(output_dir.path().join("glance-image-001.png").is_file());
+        assert_eq!(report.rendered, 0);
+        assert_eq!(report.failed, 1);
+        assert!(report.html.contains("glance-image-fallback"));
+        assert!(!report.html.contains("<img "));
     }
 
     #[test]
@@ -482,6 +550,43 @@ mod tests {
         assert!(report.html.contains("glance-image-fallback"));
         assert!(report.html.contains("Diagram"));
         assert!(!report.html.contains("<img "));
+    }
+
+    #[test]
+    fn degenerate_pixel_image_is_rejected_never_shipped_as_giant_rectangle() {
+        // Regression for the cairn pilot defect: a provider returning a 1x1
+        // pixel PNG (a stand-in some providers use for a blocked/failed
+        // generation) rendered as a full-bleed solid-color rectangle, because
+        // the CSS stretches `<img>` to fill the figure regardless of source
+        // resolution. The renderer must treat this as a failure, not ship it.
+        let output_dir = tempfile::tempdir().expect("output");
+        let mut budget = ImageBudget::new(1);
+        let provider = OnePixelImageProvider;
+        let html = r#"<!doctype html><figure data-glance-image-prompt="draw" data-glance-image-alt="Diagram"></figure>"#;
+
+        let report = render_image_requests(
+            html,
+            output_dir.path(),
+            &ImageConfig::default(),
+            &provider,
+            &mut budget,
+        );
+
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.rendered, 0);
+        assert!(report.html.contains("glance-image-fallback"));
+        assert!(!report.html.contains("<img "));
+        assert!(!output_dir.path().join("glance-image-001.png").exists());
+    }
+
+    #[test]
+    fn png_dimensions_reads_ihdr_width_and_height() {
+        let one_by_one = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137,
+        ];
+        assert_eq!(png_dimensions(&one_by_one), Some((1, 1)));
+        assert_eq!(png_dimensions(b"not a png"), None);
     }
 
     #[test]
@@ -573,6 +678,129 @@ mod tests {
                 message: "planned failure".to_owned(),
             })
         }
+    }
+
+    struct OnePixelImageProvider;
+
+    impl ImageProvider for OnePixelImageProvider {
+        fn render(&self, request: &ImageRequest) -> Result<ImageOutput, GenerationError> {
+            Ok(ImageOutput {
+                bytes: vec![
+                    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0,
+                    0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156,
+                    99, 248, 207, 192, 240, 31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73,
+                    69, 78, 68, 174, 66, 96, 130,
+                ],
+                mime_type: "image/png".to_owned(),
+                provider: "test-image".to_owned(),
+                model: request.model.clone(),
+                spend_micros: 0,
+            })
+        }
+    }
+
+    struct RealisticImageProvider;
+
+    impl ImageProvider for RealisticImageProvider {
+        fn render(&self, request: &ImageRequest) -> Result<ImageOutput, GenerationError> {
+            Ok(ImageOutput {
+                bytes: solid_png(
+                    MIN_IMAGE_DIMENSION_PX,
+                    MIN_IMAGE_DIMENSION_PX,
+                    [46, 125, 50, 255],
+                ),
+                mime_type: "image/png".to_owned(),
+                provider: "test-image".to_owned(),
+                model: request.model.clone(),
+                spend_micros: 0,
+            })
+        }
+    }
+
+    /// Builds a minimal, valid solid-color PNG at the given dimensions for
+    /// tests, using stored (uncompressed) deflate blocks so no compression
+    /// dependency is needed. Mirrors the reader in `png_dimensions`.
+    fn solid_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+        let mut raw = Vec::with_capacity((height * (1 + width * 4)) as usize);
+        for _ in 0..height {
+            raw.extend_from_slice(&[0]); // filter: none
+            for _ in 0..width {
+                raw.extend_from_slice(&rgba);
+            }
+        }
+
+        let mut png = Vec::new();
+        png.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+        let mut ihdr = Vec::with_capacity(13);
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit depth, RGBA color type
+        png.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+        png.extend_from_slice(&png_chunk(b"IDAT", &zlib_stored(&raw)));
+        png.extend_from_slice(&png_chunk(b"IEND", &[]));
+        png
+    }
+
+    fn png_chunk(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::with_capacity(8 + data.len() + 4);
+        chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        chunk.extend_from_slice(tag);
+        chunk.extend_from_slice(data);
+        let mut crc_input = Vec::with_capacity(4 + data.len());
+        crc_input.extend_from_slice(tag);
+        crc_input.extend_from_slice(data);
+        chunk.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+        chunk
+    }
+
+    /// Wraps `data` in a zlib stream using uncompressed ("stored") deflate
+    /// blocks — valid per RFC 1950/1951, just not space-efficient, which is
+    /// fine for a small test fixture.
+    fn zlib_stored(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01]; // CMF/FLG for a 32k window, no dict, checksum-aligned
+        let mut offset = 0;
+        loop {
+            let chunk_len = (data.len() - offset).min(65_535);
+            let is_final = offset + chunk_len == data.len();
+            out.push(u8::from(is_final));
+            let len = chunk_len as u16;
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&(!len).to_le_bytes());
+            out.extend_from_slice(&data[offset..offset + chunk_len]);
+            offset += chunk_len;
+            if is_final {
+                break;
+            }
+        }
+        out.extend_from_slice(&adler32(data).to_be_bytes());
+        out
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        const POLY: u32 = 0xEDB8_8320;
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ POLY
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        const MOD_ADLER: u32 = 65_521;
+        let mut a: u32 = 1;
+        let mut b: u32 = 0;
+        for &byte in data {
+            a = (a + u32::from(byte)) % MOD_ADLER;
+            b = (b + a) % MOD_ADLER;
+        }
+        (b << 16) | a
     }
 
     type RecordedImageRequest = (String, Value, BTreeMap<String, String>);

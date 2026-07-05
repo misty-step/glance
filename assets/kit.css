@@ -133,15 +133,17 @@ img, svg, iframe { max-width: 100%; }
   font-size: 16px;
   line-height: 1.32;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 .glance-hero-summary, .glance-narrative p, .glance-callout p, .glance-flow-copy {
   max-width: 76ch;
   margin: 0;
   color: var(--glance-ink);
+  overflow-wrap: anywhere;
 }
 .glance-stat-band {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 1px;
   background: var(--glance-line);
   border: 1px solid var(--glance-line);

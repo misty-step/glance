@@ -275,8 +275,10 @@ fn mock_page_spec(
         directory.clone()
     };
     let citation = prompt_context.primary_citation.as_deref();
+    // `title` is the repo name at root and the directory label everywhere else,
+    // so it is never the empty/"." subject that `directory` is at root.
     let summary = cited_sentence(
-        format!("This Glance page explains {directory} from the supplied source context."),
+        format!("This Glance page explains {title} from the supplied source context."),
         citation,
     );
     let record = snapshot.directory(&request.directory);
@@ -319,7 +321,7 @@ fn mock_page_spec(
             heading: "At 10,000 feet".to_owned(),
             paragraphs: vec![cited_sentence(
                 format!(
-                    "{directory} is rendered as a progressively disclosed room with citations woven into the prose."
+                    "{title} is rendered as a progressively disclosed room with citations woven into the prose."
                 ),
                 citation,
             )],
@@ -2468,6 +2470,44 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line.contains("warning_page=.") && line.contains("zero_spend_with_tokens")
         }));
+    }
+
+    #[test]
+    fn mock_root_page_summary_never_interpolates_the_empty_directory_label() {
+        // Regression for the cairn pilot defect: the root page's directory
+        // label is "." (glance_gen::path_label short-circuits on
+        // Path::new(".")), and the summary/narrative sentences used that
+        // label directly, producing "This Glance page explains . from the
+        // supplied source context." They must use the page title (the repo
+        // name at root) instead.
+        let default_root = PathBuf::from("crates/glance-core/tests/fixtures/mini-source");
+        let root = if default_root.exists() {
+            default_root
+        } else {
+            PathBuf::from("../glance-core/tests/fixtures/mini-source")
+        };
+        let generator = MockProvider::default();
+
+        let page = generator
+            .generate(GenerationRequest::new(
+                root,
+                PathBuf::from("."),
+                "fixture-sha".to_owned(),
+                PageKind::Root,
+            ))
+            .expect("mock root page");
+
+        assert!(
+            !page.html.contains("explains . from"),
+            "root summary must not interpolate the empty directory label: {}",
+            page.html
+        );
+        assert!(
+            !page.html.contains(">. is rendered as"),
+            "root narrative must not interpolate the empty directory label: {}",
+            page.html
+        );
+        assert!(page.html.contains("mini-source"));
     }
 
     #[test]
