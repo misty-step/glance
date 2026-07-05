@@ -92,8 +92,13 @@ grep -q 'href="../index.html"' "$tmpdir/generated-site/docs/index.html"
 grep -q 'href="parser/index.html"' "$tmpdir/generated-site/src/index.html"
 grep -q 'glance-flow-diagram' "$tmpdir/generated-site/index.html"
 grep -q 'data-theme-choice="system"' "$tmpdir/generated-site/index.html"
-grep -q '<img src="glance-image-001.png"' "$tmpdir/generated-site/index.html"
-test -f "$tmpdir/generated-site/glance-image-001.png"
+# Mock mode has no real image to show: MockImageProvider's output is
+# deliberately too small to pass image_meets_minimum_dimensions, so the root
+# page keeps the honest fallback figure, never a fake <img> (see main.rs's
+# mock_run_writes_navigation_links_that_resolve_to_generated_pages test).
+grep -q 'glance-image-fallback' "$tmpdir/generated-site/index.html"
+! grep -q '<img ' "$tmpdir/generated-site/index.html"
+test ! -f "$tmpdir/generated-site/glance-image-001.png"
 cargo run -q -p glance -- check \
   --source-root "$tmpdir/mini-source" \
   --source-sha "$mini_sha" \
