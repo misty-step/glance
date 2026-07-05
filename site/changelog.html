@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en" data-ae-theme="moss">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Glance release notes</title>
+    <meta name="description" content="User-facing release notes for Glance." />
+    <script>
+      try {
+        var m = localStorage.getItem('ae-mode');
+        if (m === 'dark' || m === 'light') {
+          document.documentElement.classList.add(m);
+          document.documentElement.style.colorScheme = m;
+        }
+      } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="aesthetic.css" />
+    <link rel="stylesheet" href="marketing.css" />
+  </head>
+  <body>
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <symbol id="i-scan-search" viewBox="0 0 24 24">
+        <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+        <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+        <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+        <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+        <circle cx="12" cy="12" r="3" />
+        <path d="m16 16-1.9-1.9" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2" />
+        <path d="M12 20v2" />
+        <path d="m4.93 4.93 1.41 1.41" />
+        <path d="m17.66 17.66 1.41 1.41" />
+        <path d="M2 12h2" />
+        <path d="M20 12h2" />
+        <path d="m6.34 17.66-1.41 1.41" />
+        <path d="m19.07 4.93-1.41 1.41" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+      </symbol>
+      <symbol id="i-circle-check" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" />
+        <path d="m9 12 2 2 4-4" />
+      </symbol>
+    </svg>
+
+    <div class="ae-screen ae-wide">
+      <header class="ae-bar msk-bar">
+        <a class="ae-logo" href="./" aria-label="Glance home">
+          <span class="ae-app-mark" aria-hidden="true">
+            <svg class="ae-icon" data-lucide="scan-search">
+              <use href="#i-scan-search" />
+            </svg>
+          </span>
+          <span class="ae-name">Glance</span>
+        </a>
+        <span class="msk-actions">
+          <nav class="ae-chrome msk-nav" aria-label="Site">
+            <a href="./">home</a>
+            <a href="changelog.html" aria-current="page">release notes</a>
+          </nav>
+          <button class="ae-mode" aria-label="toggle color mode">
+            <svg class="ae-icon ae-sun"><use href="#i-sun" /></svg>
+            <svg class="ae-icon ae-moon"><use href="#i-moon" /></svg>
+          </button>
+        </span>
+      </header>
+
+      <main class="ae-stage ae-stage-scroll">
+        <article class="ae-doc msk-page" aria-labelledby="release-notes-title">
+          <h1 id="release-notes-title">Release notes</h1>
+          <p class="ae-lede">
+            Glance has no tagged release yet. These notes track real, dated
+            commits to the repo — including the fixes behind this site's own
+            screenshots.
+          </p>
+
+          <section class="msk-release">
+            <p class="ae-chrome">2026-07-04 - honesty fixes</p>
+            <h2>The gate stops shipping broken pages</h2>
+            <ul>
+              <li>
+                A generated page can no longer ship with a placeholder image
+                or an empty-subject sentence — both used to slip through
+                silently on a bad model response.
+              </li>
+              <li>
+                Flow-diagram edge labels now stagger so converging edges never
+                overlap into unreadable text.
+              </li>
+              <li>
+                Page-spec rendering moved to a validated JSON contract
+                (<code>glance-catalog-001</code>) instead of raw generated
+                HTML, closing off a class of malformed output at the source.
+              </li>
+            </ul>
+            <p class="ae-status">
+              <svg class="ae-icon ae-ok" data-lucide="circle-check">
+                <use href="#i-circle-check" />
+              </svg>
+              <span class="ae-status-label"
+                >Evidence: <code>fix: never ship a placeholder image or
+                empty-subject sentence</code> and <code>fix: stagger
+                flow-diagram edge labels</code> on <code>main</code>.</span
+              >
+            </p>
+          </section>
+
+          <section class="msk-release">
+            <p class="ae-chrome">2026-07-05 - public site</p>
+            <h2>Public site launched</h2>
+            <ul>
+              <li>
+                Added a Misty Step branded public site built from a real
+                self-run of the current, post-fix codebase — a screenshot
+                gallery showing Glance narrating its own repository, its own
+                citation gate passing, and a real cited page.
+              </li>
+              <li>
+                The repo is currently private, so the footer has no public
+                GitHub link yet.
+              </li>
+            </ul>
+            <p class="ae-status">
+              <svg class="ae-icon ae-ok" data-lucide="circle-check">
+                <use href="#i-circle-check" />
+              </svg>
+              <span class="ae-status-label"
+                >Evidence: GitHub Pages deploy (pending visibility).</span
+              >
+            </p>
+          </section>
+        </article>
+      </main>
+
+      <footer class="ae-bar msk-footer">
+        <p class="ae-chrome">Glance release notes, ahead of the repo going public.</p>
+        <nav class="ae-foot-links ae-chrome" aria-label="Footer">
+          <a data-footer-link="misty-step" href="https://mistystep.io"
+            >Misty Step</a
+          >
+        </nav>
+      </footer>
+    </div>
+
+    <script src="mode.js"></script>
+    <script src="theme.js"></script>
+  </body>
+</html>
