@@ -4,6 +4,7 @@ members = [
   "crates/glance-check",
   "crates/glance-core",
   "crates/glance-gen",
+  "crates/glance-mcp",
   "crates/glance-publish",
 ]
 resolver = "3"
