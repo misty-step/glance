@@ -718,6 +718,17 @@ fn render_narrative(narrative: &Narrative, context: &RenderContext<'_>) -> Strin
     html
 }
 
+/// Rough monospace glyph width at the 13px flow-diagram label font
+/// (`.glance-flow-diagram text` in kit.css), used only to detect and stagger
+/// overlapping edge labels — not for pixel-perfect measurement.
+const FLOW_LABEL_CHAR_WIDTH_PX: i32 = 8;
+/// Minimum horizontal gap required between two edge labels before they're
+/// considered non-overlapping.
+const FLOW_LABEL_GAP_PX: i32 = 12;
+/// Vertical spacing between stacked label lanes.
+const FLOW_LABEL_LANE_HEIGHT_PX: i32 = 16;
+const FLOW_LABEL_BASE_Y: i32 = 52;
+
 fn render_flow_diagram(flow: &FlowDiagram) -> String {
     let width = (flow.nodes.len().max(2) as i32 * 180).max(360);
     let mut positions = BTreeMap::new();
@@ -725,27 +736,38 @@ fn render_flow_diagram(flow: &FlowDiagram) -> String {
         positions.insert(node.id.as_str(), (90 + index as i32 * 180, 86));
     }
 
-    let mut svg = format!(
-        r#"<section class="glance-component glance-flow-section" data-glance-component="flow_diagram"><h2 class="glance-section-title">Flow</h2><svg class="glance-flow-diagram" viewBox="0 0 {width} 172" role="img" aria-label="Glance flow diagram"><defs><marker id="glance-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z"></path></marker></defs>"#
-    );
+    let mut edges = Vec::new();
     for edge in &flow.edges {
-        if let (Some((from_x, from_y)), Some((to_x, _to_y))) = (
+        if let (Some(&(from_x, from_y)), Some(&(to_x, _to_y))) = (
             positions.get(edge.from.as_str()),
             positions.get(edge.to.as_str()),
         ) {
             let mid_x = (from_x + to_x) / 2;
             let label = edge.label.as_deref().unwrap_or("");
-            svg.push_str(&format!(
-                r#"<path class="glance-flow-pulse" d="M{} {} H{}" marker-end="url(#glance-arrow)"></path><text x="{mid_x}" y="52">{}</text>"#,
-                from_x + 58,
-                from_y,
-                to_x - 58,
-                html_escape(label)
-            ));
+            let half_width = (label.chars().count() as i32 * FLOW_LABEL_CHAR_WIDTH_PX) / 2;
+            edges.push((from_x, from_y, to_x, mid_x, half_width, label));
         }
     }
+    let lanes = assign_label_lanes(&edges);
+    let top_offset = lanes.iter().copied().max().unwrap_or(0) * FLOW_LABEL_LANE_HEIGHT_PX;
+    let height = 172 + top_offset;
+
+    let mut svg = format!(
+        r#"<section class="glance-component glance-flow-section" data-glance-component="flow_diagram"><h2 class="glance-section-title">Flow</h2><svg class="glance-flow-diagram" viewBox="0 0 {width} {height}" role="img" aria-label="Glance flow diagram"><defs><marker id="glance-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z"></path></marker></defs>"#
+    );
+    for ((from_x, from_y, to_x, mid_x, _half_width, label), lane) in edges.iter().zip(&lanes) {
+        let label_y = FLOW_LABEL_BASE_Y + top_offset - lane * FLOW_LABEL_LANE_HEIGHT_PX;
+        svg.push_str(&format!(
+            r#"<path class="glance-flow-pulse" d="M{} {} H{}" marker-end="url(#glance-arrow)"></path><text x="{mid_x}" y="{label_y}">{}</text>"#,
+            from_x + 58,
+            from_y + top_offset,
+            to_x - 58,
+            html_escape(label)
+        ));
+    }
     for node in &flow.nodes {
-        if let Some((x, y)) = positions.get(node.id.as_str()) {
+        if let Some(&(x, y)) = positions.get(node.id.as_str()) {
+            let y = y + top_offset;
             svg.push_str(&format!(
                 r#"<g><rect x="{}" y="{}" width="116" height="48"></rect><text x="{}" y="{}">{}</text><text x="{}" y="{}">{}</text></g>"#,
                 x - 58,
@@ -761,6 +783,37 @@ fn render_flow_diagram(flow: &FlowDiagram) -> String {
     }
     svg.push_str("</svg></section>");
     svg
+}
+
+/// Assigns each edge label a lane number (0 = the default baseline row,
+/// 1, 2, ... stacked progressively higher) so that no two labels whose
+/// estimated horizontal extents overlap share a lane. Diagrams with no
+/// crowding get every label in lane 0, rendering exactly as before.
+fn assign_label_lanes(edges: &[(i32, i32, i32, i32, i32, &str)]) -> Vec<i32> {
+    let mut order: Vec<usize> = (0..edges.len()).collect();
+    order.sort_by_key(|&index| {
+        let (_, _, _, mid_x, half_width, _) = edges[index];
+        mid_x - half_width
+    });
+
+    let mut lane_rightmost: Vec<i32> = Vec::new();
+    let mut lanes = vec![0; edges.len()];
+    for index in order {
+        let (_, _, _, mid_x, half_width, _) = edges[index];
+        let left = mid_x - half_width;
+        let right = mid_x + half_width;
+        let lane = lane_rightmost
+            .iter()
+            .position(|&rightmost| rightmost + FLOW_LABEL_GAP_PX <= left)
+            .unwrap_or(lane_rightmost.len());
+        if lane == lane_rightmost.len() {
+            lane_rightmost.push(right);
+        } else {
+            lane_rightmost[lane] = right;
+        }
+        lanes[index] = lane as i32;
+    }
+    lanes
 }
 
 fn render_file_table(table: &FileTable, context: &RenderContext<'_>) -> String {

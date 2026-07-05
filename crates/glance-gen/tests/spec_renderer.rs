@@ -161,6 +161,132 @@ fn renderer_draws_flow_svg_and_composes_structured_image_prompt() {
 }
 
 #[test]
+fn flow_diagram_stacks_labels_so_converging_edges_never_share_a_position() {
+    // Regression for the cairn pilot defect (glance-925): a root page with
+    // several flow edges converging on shared nodes rendered two edge labels
+    // at the exact same (x, y) — "stored habits, entries, settings" and
+    // "history drives derived streaks" both at x=900 y=52 — plus a run of
+    // short-hop edges whose labels were far wider than the gap between them.
+    // This fixture reproduces that shape: a forward and a reverse edge
+    // between the same pair of nodes (guaranteed identical midpoint) plus
+    // three short adjacent edges into one node with long descriptive labels.
+    let snapshot = snapshot_tree(fixture_root(), "fixture-sha").expect("snapshot");
+    let mut spec = fixture_spec();
+    let flow_index = spec
+        .components
+        .iter()
+        .position(|component| matches!(component, Component::FlowDiagram(_)))
+        .expect("fixture has a flow diagram");
+    spec.components[flow_index] = Component::FlowDiagram(FlowDiagram {
+        nodes: vec![
+            FlowNode {
+                id: "a".to_owned(),
+                label: "a".to_owned(),
+                kind: "dir".to_owned(),
+            },
+            FlowNode {
+                id: "b".to_owned(),
+                label: "b".to_owned(),
+                kind: "dir".to_owned(),
+            },
+            FlowNode {
+                id: "c".to_owned(),
+                label: "c".to_owned(),
+                kind: "dir".to_owned(),
+            },
+            FlowNode {
+                id: "d".to_owned(),
+                label: "d".to_owned(),
+                kind: "dir".to_owned(),
+            },
+            FlowNode {
+                id: "e".to_owned(),
+                label: "e".to_owned(),
+                kind: "dir".to_owned(),
+            },
+        ],
+        edges: vec![
+            FlowEdge {
+                from: "a".to_owned(),
+                to: "d".to_owned(),
+                label: Some("check, edit, reorder, overview".to_owned()),
+            },
+            FlowEdge {
+                from: "b".to_owned(),
+                to: "d".to_owned(),
+                label: Some("thin HTTP client".to_owned()),
+            },
+            FlowEdge {
+                from: "c".to_owned(),
+                to: "d".to_owned(),
+                label: Some("agent tools over JSON-RPC".to_owned()),
+            },
+            FlowEdge {
+                from: "d".to_owned(),
+                to: "e".to_owned(),
+                label: Some("stored habits, entries, settings".to_owned()),
+            },
+            FlowEdge {
+                from: "e".to_owned(),
+                to: "d".to_owned(),
+                label: Some("history drives derived streaks".to_owned()),
+            },
+        ],
+        lanes: Vec::new(),
+    });
+
+    let html = render_page_spec(
+        &spec,
+        &RenderContext {
+            snapshot: &snapshot,
+            directory: Path::new("."),
+            source_sha: "fixture-sha",
+            prompt_version: "test-prompt",
+            kind: PageKind::Root,
+        },
+    )
+    .expect("rendered html");
+
+    let flow_start = html
+        .find(r#"data-glance-component="flow_diagram""#)
+        .expect("flow diagram section");
+    let flow_end = html[flow_start..]
+        .find("</svg>")
+        .map(|offset| flow_start + offset)
+        .expect("flow diagram closes");
+    let flow_svg = &html[flow_start..flow_end];
+
+    let label_positions: Vec<(String, String)> = flow_svg
+        .match_indices("<text x=\"")
+        .map(|(start, _)| {
+            let rest = &flow_svg[start + "<text x=\"".len()..];
+            let x_end = rest.find('"').expect("x attr closes");
+            let x = rest[..x_end].to_owned();
+            let after_x = &rest[x_end..];
+            let y_start = after_x.find("y=\"").expect("y attr present") + "y=\"".len();
+            let y_rest = &after_x[y_start..];
+            let y_end = y_rest.find('"').expect("y attr closes");
+            (x, y_rest[..y_end].to_owned())
+        })
+        .collect();
+
+    // 5 edge labels + 5 nodes x 2 labels (name + kind) each.
+    assert_eq!(label_positions.len(), 5 + 5 * 2);
+
+    let mut seen = std::collections::HashSet::new();
+    for position in &label_positions {
+        assert!(
+            seen.insert(position.clone()),
+            "duplicate label position {position:?} in flow diagram: {flow_svg}"
+        );
+    }
+
+    // The stacking pushed at least one label off the default baseline lane.
+    assert!(flow_svg.contains("viewBox=\"0 0 900 "));
+    assert!(!flow_svg.contains("viewBox=\"0 0 900 172\""));
+}
+
+#[test]
 fn spec_validation_recurses_into_disclosure_children() {
     let mut spec = fixture_spec();
     let Some(Component::Disclosure(disclosure)) = spec.components.last_mut() else {
