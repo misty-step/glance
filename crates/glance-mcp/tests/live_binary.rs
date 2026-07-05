@@ -1,82 +1,93 @@
 //! Exercises the real compiled `glance` binary through the MCP dispatch path,
-//! not just a mocked subprocess. `cargo test --workspace` builds every
-//! member's binaries as a side effect (including `glance`) before any test
-//! runs, so the debug binary is on disk by the time this test starts.
+//! not just a mocked subprocess.
+//!
+//! `cargo test --workspace` does not guarantee `glance`'s binary is already
+//! linked to disk before this crate's test binary starts running -- cargo
+//! can stream-start an already-built test binary while sibling crates are
+//! still compiling, and a fresh CI checkout has no head start from an
+//! earlier manual `cargo build`. So this test builds the binary itself if
+//! it isn't already there, rather than assuming build order.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use serde_json::json;
 
-fn glance_debug_binary() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
-        .expect("crates/glance-mcp is two levels under the workspace root");
+        .expect("crates/glance-mcp is two levels under the workspace root")
+        .to_path_buf()
+}
+
+fn glance_debug_binary() -> PathBuf {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("target"));
+        .unwrap_or_else(|| workspace_root().join("target"));
     target_dir.join("debug").join("glance")
 }
 
-fn with_glance_bin<T>(run: impl FnOnce() -> T) -> T {
+fn ensure_glance_binary() -> PathBuf {
     let binary = glance_debug_binary();
+    if binary.is_file() {
+        return binary;
+    }
+    let status = Command::new(env!("CARGO"))
+        .args(["build", "-p", "glance"])
+        .current_dir(workspace_root())
+        .status()
+        .expect("spawn cargo build -p glance");
+    assert!(status.success(), "cargo build -p glance failed");
     assert!(
         binary.is_file(),
-        "expected a compiled glance binary at {}; run `cargo build -p glance` first",
+        "expected a compiled glance binary at {} after building it",
         binary.display()
     );
-    // SAFETY: test-only; sets an env var this same test reads back via
-    // glance_mcp::call_tool. Tests in this file do not run this closure
-    // concurrently with a differing GLANCE_BIN.
+    binary
+}
+
+#[test]
+fn mcp_tools_run_and_check_dispatch_to_the_real_binary() {
+    let binary = ensure_glance_binary();
+    // SAFETY: test-only, single-threaded within this process (this is the
+    // only test in this file that touches GLANCE_BIN, so there is no
+    // concurrent mutation from a sibling test).
     unsafe {
         std::env::set_var("GLANCE_BIN", &binary);
     }
-    let result = run();
+
+    let root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../glance-core/tests/fixtures/mini-source");
+    let plan_response = glance_mcp::call_tool(
+        "plan",
+        &json!({
+            "root": root.display().to_string(),
+            "changed": ["src/parser/mod.rs"],
+        }),
+    )
+    .expect("plan tool call");
+    let plan_text = plan_response["content"][0]["text"].as_str().expect("text");
+    let plan_payload: serde_json::Value = serde_json::from_str(plan_text).expect("json payload");
+    assert_eq!(plan_payload["exit_code"], 0);
+    let stdout = plan_payload["stdout"].as_str().expect("stdout");
+    assert!(stdout.contains("src/parser"));
+    assert!(stdout.contains("src"));
+
+    let check_response = glance_mcp::call_tool(
+        "check",
+        &json!({
+            "source_root": "/nonexistent/source/root",
+            "source_sha": "deadbeef",
+            "html": ["/nonexistent/page.html"],
+        }),
+    )
+    .expect("check tool call returns a structured result even on CLI failure");
+    let check_text = check_response["content"][0]["text"].as_str().expect("text");
+    let check_payload: serde_json::Value = serde_json::from_str(check_text).expect("json payload");
+    assert_ne!(check_payload["exit_code"], 0);
+
     unsafe {
         std::env::remove_var("GLANCE_BIN");
     }
-    result
-}
-
-#[test]
-fn plan_tool_runs_the_real_binary_against_the_mini_source_fixture() {
-    with_glance_bin(|| {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../glance-core/tests/fixtures/mini-source");
-        let response = glance_mcp::call_tool(
-            "plan",
-            &json!({
-                "root": root.display().to_string(),
-                "changed": ["src/parser/mod.rs"],
-            }),
-        )
-        .expect("plan tool call");
-
-        let text = response["content"][0]["text"].as_str().expect("text");
-        let payload: serde_json::Value = serde_json::from_str(text).expect("json payload");
-        assert_eq!(payload["exit_code"], 0);
-        let stdout = payload["stdout"].as_str().expect("stdout");
-        assert!(stdout.contains("src/parser"));
-        assert!(stdout.contains("src"));
-    });
-}
-
-#[test]
-fn check_tool_surfaces_a_nonzero_exit_code_without_panicking() {
-    with_glance_bin(|| {
-        let response = glance_mcp::call_tool(
-            "check",
-            &json!({
-                "source_root": "/nonexistent/source/root",
-                "source_sha": "deadbeef",
-                "html": ["/nonexistent/page.html"],
-            }),
-        )
-        .expect("check tool call returns a structured result even on CLI failure");
-
-        let text = response["content"][0]["text"].as_str().expect("text");
-        let payload: serde_json::Value = serde_json::from_str(text).expect("json payload");
-        assert_ne!(payload["exit_code"], 0);
-    });
 }
