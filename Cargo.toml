@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/glance",
+  "crates/glance-catalog",
   "crates/glance-check",
   "crates/glance-core",
   "crates/glance-gen",
@@ -17,6 +18,7 @@ rust-version = "1.96"
 
 [workspace.dependencies]
 anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 scraper = "0.23"
 serde = { version = "1", features = ["derive"] }
