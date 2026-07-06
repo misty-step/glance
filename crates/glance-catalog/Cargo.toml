@@ -1,0 +1,15 @@
+[package]
+name = "glance-catalog"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Shared two-tier report component catalog (aesthetic-926): leaf content primitives + structural report grammar, with per-consumer layout profiles."
+
+[dependencies]
+chrono.workspace = true
+pulldown-cmark = "0.13"
+serde.workspace = true
+serde_json = "1"
+thiserror.workspace = true

@@ -1,0 +1,350 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://misty-step.dev/aesthetic/catalog/aesthetic-catalog-001.schema.json",
+  "title": "Aesthetic Report Component Catalog v001",
+  "description": "aesthetic-926: two-tier catalog -- 8 leaf content primitives (Sideshow-proven) + 5 structural report-grammar primitives (glance-next/fleet-retro-proven). One Component per element of a components array; ordering rules are a per-consumer LayoutProfile concern, not encoded here (see crates/glance-catalog/src/profile.rs).",
+  "$defs": {
+    "inline_node": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text", "href"],
+          "properties": {
+            "type": { "const": "link" },
+            "text": { "type": "string", "minLength": 1 },
+            "href": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text", "ref_id"],
+          "properties": {
+            "type": { "const": "cite" },
+            "text": { "type": "string", "minLength": 1 },
+            "ref_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Opaque -- glance encodes 'path:lines', fleet-retro an evidence-pack item id. Resolved to an href by the consumer's render-time cite_href callback, never by this schema."
+            }
+          }
+        }
+      ]
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "label", "value"],
+      "properties": {
+        "type": { "const": "metric" },
+        "label": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "markdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "content"],
+      "properties": {
+        "type": { "const": "markdown" },
+        "content": { "type": "string", "minLength": 1 }
+      }
+    },
+    "code": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "content"],
+      "properties": {
+        "type": { "const": "code" },
+        "language": { "type": "string" },
+        "content": { "type": "string", "minLength": 1 },
+        "cite_ref_id": { "type": "string" }
+      }
+    },
+    "diff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "unified"],
+      "properties": {
+        "type": { "const": "diff" },
+        "unified": { "type": "string", "minLength": 1 }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "content"],
+      "properties": {
+        "type": { "const": "terminal" },
+        "content": { "type": "string", "minLength": 1 }
+      },
+      "description": "SGR-only ANSI text -- not a full TUI emulator."
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "asset_id", "alt"],
+      "properties": {
+        "type": { "const": "image" },
+        "asset_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Content-addressed id, conventionally a SHA256 hash (Sideshow's dedup scheme)."
+        },
+        "alt": { "type": "string", "minLength": 1 },
+        "caption": { "type": "string" }
+      }
+    },
+    "mermaid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "source"],
+      "properties": {
+        "type": { "const": "mermaid" },
+        "source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "callout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "kind", "title", "body"],
+      "properties": {
+        "type": { "const": "callout" },
+        "kind": { "enum": ["seam", "hurt", "invariant", "contract"] },
+        "title": { "type": "string", "minLength": 1 },
+        "body": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/inline_node" }
+        }
+      }
+    },
+    "hero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "title", "summary"],
+      "properties": {
+        "type": { "const": "hero" },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/inline_node" }
+        },
+        "stats": {
+          "type": "array",
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/metric" }
+        },
+        "image_intent": { "type": "string" }
+      }
+    },
+    "narrative": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "heading", "status"],
+      "properties": {
+        "type": { "const": "narrative" },
+        "heading": { "type": "string", "minLength": 1 },
+        "status": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "paragraphs"],
+              "properties": {
+                "status": { "const": "ok" },
+                "paragraphs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/$defs/inline_node" }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "reason"],
+              "properties": {
+                "status": { "const": "unavailable" },
+                "reason": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "table_cell_value": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text"],
+          "properties": { "type": { "const": "text" }, "text": { "type": "string" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text", "href"],
+          "properties": {
+            "type": { "const": "link" },
+            "text": { "type": "string" },
+            "href": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "items"],
+          "properties": {
+            "type": { "const": "code" },
+            "items": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "items"],
+          "properties": {
+            "type": { "const": "list" },
+            "items": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ]
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "heading", "columns", "rows"],
+      "properties": {
+        "type": { "const": "table" },
+        "heading": { "type": "string", "minLength": 1 },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "label"],
+            "properties": {
+              "key": { "type": "string", "minLength": 1 },
+              "label": { "type": "string", "minLength": 1 },
+              "numeric": { "type": "boolean" }
+            }
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cells"],
+            "properties": {
+              "cells": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["column_key", "value"],
+                  "properties": {
+                    "column_key": { "type": "string" },
+                    "value": { "$ref": "#/$defs/table_cell_value" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "empty_note": {
+          "type": "string",
+          "description": "Required by the Rust validator when rows is empty -- not expressible as a static JSON Schema conditional without duplicating the rows arity, so this is enforced in Table::validate instead."
+        },
+        "demoted_note": { "type": "string" }
+      }
+    },
+    "timeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "heading", "entries"],
+      "properties": {
+        "type": { "const": "timeline" },
+        "heading": { "type": "string", "minLength": 1 },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["at", "actor", "kind", "summary"],
+            "properties": {
+              "at": { "type": "string", "format": "date-time" },
+              "actor": { "type": "string", "minLength": 1 },
+              "kind": { "type": "string", "minLength": 1 },
+              "summary": { "type": "string", "minLength": 1 },
+              "link": { "type": "string" },
+              "detail": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/inline_node" }
+              }
+            }
+          }
+        },
+        "empty_note": { "type": "string" }
+      }
+    },
+    "disclosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "heading", "children"],
+      "properties": {
+        "type": { "const": "disclosure" },
+        "heading": { "type": "string", "minLength": 1 },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/component" }
+        }
+      }
+    },
+    "component": {
+      "description": "The catalog's single tagged union. children cannot contain hero or disclosure -- enforced by Disclosure::validate, not this schema.",
+      "oneOf": [
+        { "$ref": "#/$defs/markdown" },
+        { "$ref": "#/$defs/code" },
+        { "$ref": "#/$defs/diff" },
+        { "$ref": "#/$defs/terminal" },
+        { "$ref": "#/$defs/image" },
+        { "$ref": "#/$defs/mermaid" },
+        { "$ref": "#/$defs/metric" },
+        { "$ref": "#/$defs/callout" },
+        { "$ref": "#/$defs/hero" },
+        { "$ref": "#/$defs/narrative" },
+        { "$ref": "#/$defs/table" },
+        { "$ref": "#/$defs/timeline" },
+        { "$ref": "#/$defs/disclosure" }
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["catalog_version", "components"],
+  "properties": {
+    "catalog_version": { "const": "aesthetic-catalog-001" },
+    "components": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/component" }
+    }
+  }
+}
