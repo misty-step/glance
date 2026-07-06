@@ -158,8 +158,18 @@ fn render_narrative(narrative: &Narrative, ctx: &RenderContext<'_>) -> String {
 fn render_table(table: &Table) -> String {
     if table.rows.is_empty() {
         let note = table.empty_note.as_deref().unwrap_or("");
+        // A table with zero rows can still carry a demoted_note (e.g. every
+        // candidate row was demoted for having no signal, not because
+        // nothing was swept) -- both notes must render, not just
+        // empty_note, or the demotion becomes silent instead of a muted
+        // note (the exact failure `demoted_note` exists to prevent).
+        let demoted = table
+            .demoted_note
+            .as_ref()
+            .map(|note| format!(r#"<p class="ae-dim">{}</p>"#, html_escape(note)))
+            .unwrap_or_default();
         return format!(
-            r#"<section class="ae-section" data-glance-component="table"><h2>{}</h2><p class="ae-dim">{}</p></section>"#,
+            r#"<section class="ae-section" data-glance-component="table"><h2>{}</h2><p class="ae-dim">{}</p>{demoted}</section>"#,
             html_escape(&table.heading),
             html_escape(note)
         );
@@ -389,6 +399,29 @@ mod tests {
         assert!(html.contains("ae-table"));
         assert!(html.contains("landmark"));
         assert!(html.contains(r#"<td class="num">5</td>"#));
+    }
+
+    #[test]
+    fn empty_table_still_renders_a_demoted_note_when_every_row_was_demoted() {
+        // Regression: a table can have zero rows *and* a demoted_note at
+        // the same time (every candidate row was demoted for carrying no
+        // signal, not because nothing was swept at all) -- both must
+        // render, or the demotion silently vanishes instead of showing as
+        // a muted note.
+        let table = Component::Table(Table {
+            heading: "Repo activity".into(),
+            columns: vec![ColumnSpec {
+                key: "repo".into(),
+                label: "repo".into(),
+                numeric: false,
+            }],
+            rows: vec![],
+            empty_note: Some("No repo activity in this window.".into()),
+            demoted_note: Some("2 repo(s) swept with no activity: glass, canary".into()),
+        });
+        let html = render_component(&table, &ctx());
+        assert!(html.contains("No repo activity in this window."));
+        assert!(html.contains("2 repo(s) swept with no activity: glass, canary"));
     }
 
     #[test]
