@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+glance-catalog = { path = "../glance-catalog" }
 glance-check = { path = "../glance-check" }
 glance-core = { path = "../glance-core" }
 base64 = "0.22"
