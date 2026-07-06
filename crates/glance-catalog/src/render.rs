@@ -202,6 +202,8 @@ fn render_table(table: &Table) -> String {
                         .unwrap_or_default();
                     let class = if column.numeric {
                         r#" class="num""#
+                    } else if column.emphasize {
+                        r#" class="ae-item""#
                     } else {
                         ""
                     };
@@ -371,11 +373,13 @@ mod tests {
                     key: "repo".into(),
                     label: "repo".into(),
                     numeric: false,
+                    emphasize: false,
                 },
                 ColumnSpec {
                     key: "commits".into(),
                     label: "commits".into(),
                     numeric: true,
+                    emphasize: false,
                 },
             ],
             rows: vec![Row {
@@ -414,6 +418,7 @@ mod tests {
                 key: "repo".into(),
                 label: "repo".into(),
                 numeric: false,
+                emphasize: false,
             }],
             rows: vec![],
             empty_note: Some("No repo activity in this window.".into()),

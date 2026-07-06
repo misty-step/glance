@@ -13,10 +13,20 @@ use crate::inline::{InlineNode, render_inline_nodes, validate_inline_nodes};
 use crate::leaf::Metric;
 use crate::{CatalogError, Component};
 
-/// Title + summary + 0-4 metric chips. Merges glance-next's `Hero` (title,
+/// Title + summary + metric chips. Merges glance-next's `Hero` (title,
 /// summary, stats, optional image_request) and fleet-retro's `Hero` +
 /// `StatCallouts` (headline, subhead, a separate stat-chip component) into
 /// one struct -- convergently invented 3x per the oracle research.
+///
+/// No upper bound on `stats`: glance-gen's original `Hero` capped this at
+/// 2-4 for its own single-page-doc visual band, but that was a
+/// glance-specific display choice, not a catalog invariant -- enforcing it
+/// here silently dropped 4 of fleet-retro's 8 summary stats during the
+/// aesthetic-926 migration (caught by a rendered-output parity diff against
+/// the pre-migration baseline, not a mocked test). A consumer that wants a
+/// tighter visual band enforces its own cap locally, the same way
+/// glance-gen's `PageSpec::validate_for_kind` layers extra business rules
+/// on top of this crate's `LayoutProfile` validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hero {
@@ -35,9 +45,6 @@ impl Hero {
         }
         validate_inline_nodes("hero.summary", &self.summary)
             .map_err(|error| CatalogError::new(error.to_string()))?;
-        if self.stats.len() > 4 {
-            return Err(CatalogError::new("hero.stats carries at most 4 chips"));
-        }
         for stat in &self.stats {
             stat.validate()?;
         }
@@ -99,6 +106,14 @@ pub struct ColumnSpec {
     pub label: String,
     #[serde(default)]
     pub numeric: bool,
+    /// Renders this column's cells with the Aesthetic kit's `.ae-item`
+    /// class ("an item that matters: medium ink") -- glance-gen's
+    /// `FileTable` and fleet-retro's `RepoActivityTable` both gave their
+    /// name/repo column this emphasis; the generic `Table` preserves it as
+    /// a column-level flag instead of hardcoding "the first column" (a
+    /// consumer may not want its identifying column first).
+    #[serde(default)]
+    pub emphasize: bool,
 }
 
 // Every variant is struct-like (never a bare newtype around a string/Vec)
@@ -322,11 +337,17 @@ mod tests {
     }
 
     #[test]
-    fn hero_rejects_more_than_four_stats() {
+    fn hero_allows_more_than_four_stats_no_universal_cap() {
+        // Regression: an earlier version of this crate capped hero.stats at
+        // 4, silently dropping 4 of fleet-retro's 8 summary stats during
+        // its aesthetic-926 migration. A consumer with more summary numbers
+        // than fit a compact visual band enforces its own tighter cap
+        // locally; this crate only requires each stat be individually
+        // well-formed.
         let hero = Hero {
             title: "t".into(),
             summary: text("s"),
-            stats: (0..5)
+            stats: (0..8)
                 .map(|i| Metric {
                     label: i.to_string(),
                     value: i.to_string(),
@@ -334,7 +355,7 @@ mod tests {
                 .collect(),
             image_intent: None,
         };
-        assert!(hero.validate().is_err());
+        assert!(hero.validate().is_ok());
     }
 
     #[test]
@@ -357,6 +378,7 @@ mod tests {
                 key: "repo".into(),
                 label: "repo".into(),
                 numeric: false,
+                emphasize: false,
             }],
             rows: vec![Row {
                 cells: vec![Cell {
@@ -378,6 +400,7 @@ mod tests {
                 key: "repo".into(),
                 label: "repo".into(),
                 numeric: false,
+                emphasize: false,
             }],
             rows: vec![],
             empty_note: None,
@@ -401,11 +424,13 @@ mod tests {
                     key: "kind".into(),
                     label: "kind".into(),
                     numeric: false,
+                    emphasize: false,
                 },
                 ColumnSpec {
                     key: "name".into(),
                     label: "name".into(),
                     numeric: false,
+                    emphasize: false,
                 },
             ],
             rows: vec![Row {
@@ -437,11 +462,13 @@ mod tests {
                     key: "repo".into(),
                     label: "repo".into(),
                     numeric: false,
+                    emphasize: false,
                 },
                 ColumnSpec {
                     key: "commits".into(),
                     label: "commits".into(),
                     numeric: true,
+                    emphasize: false,
                 },
             ],
             rows: vec![Row {

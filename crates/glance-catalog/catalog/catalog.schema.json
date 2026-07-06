@@ -143,7 +143,6 @@
         },
         "stats": {
           "type": "array",
-          "maxItems": 4,
           "items": { "$ref": "#/$defs/metric" }
         },
         "image_intent": { "type": "string" }
