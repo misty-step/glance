@@ -1,3 +1,45 @@
+//! glance-gen's page spec: a directory-tour envelope (breadcrumbs,
+//! parent/child/sibling links, source-line citations resolved to GitHub blob
+//! URLs) that validates through `glance_catalog`'s shared primitives
+//! (glance-927, first slice of glance-922).
+//!
+//! Wire JSON is unchanged (`catalog.schema.json` still governs `path`/`lines`
+//! citations and the fixed `kind`/`title`/`body` callout shape --
+//! `crates/glance/src/main.rs` depends on this schema, a real external
+//! contract). `Hero` and `Callout` field validation delegates to
+//! `glance_catalog::structural`/`leaf` via small `to_catalog_*` converters;
+//! `hero.stats`' 2-4 cap is glance's own display-band rule, layered on top
+//! the same way `validate_for_kind` layers ordering rules on
+//! `glance_catalog::validate_layout`. `Narrative`'s own validate body stays
+//! (heading/paragraphs non-empty is cheaper to check directly than to
+//! convert into `glance_catalog::structural::Narrative`'s
+//! `NarrativeStatus::Ok` wrapper for).
+//!
+//! Rendering stays local for Hero, Narrative, Callouts, the file table, and
+//! Disclosure -- not merely to avoid a rewrite, but because
+//! `glance_catalog::render_component` cannot reproduce three things this
+//! crate's own tests and downstream readers depend on: (1) hero's and
+//! callouts' `data-glance-section` markers, read back by
+//! `context.rs::distill_generated_page` to assemble a parent page's prompt
+//! context from an already-generated child; (2) the citation popover's
+//! `data-cite-label` attribute and `glance-cite` class (`kit.css`), which the
+//! shared crate's `Cite` renderer does not emit; (3) file-table directory
+//! cells rendered as `glance_check::directory_href` links, which need this
+//! crate's own `RenderContext` (`DirectorySnapshot` + current directory).
+//! `FileTable`/`FileRow` stay glance's own types rather than `Table`'s
+//! generic column/cell schema for the same reason -- the fixed
+//! kind/name/role/signatures/gotcha shape plus directory links and per-row
+//! citations don't fit without inventing shared-crate surface only this one
+//! consumer would use (the "arbitrating a winner where no second
+//! implementation exists" trap the crate's own docs warn about).
+//! `FlowDiagram`/`ImageFigure`/`CustomHtml` have no catalog equivalent at
+//! all and stay fully local, per the same principle.
+//!
+//! Deleted: this module's own HTML-escaping (`glance_catalog::inline::html_escape`
+//! is now the sole `html_escape`), and `Hero`/`Callout`'s own
+//! field-validation bodies where `glance_catalog` already proves the same
+//! rule once.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -164,22 +206,38 @@ pub struct Hero {
 
 impl Hero {
     fn validate(&self) -> Result<(), SpecError> {
-        if self.title.trim().is_empty() {
-            return Err(SpecError::new("hero.title is required"));
-        }
-        validate_inline_nodes("hero.summary", &self.summary)?;
+        // Field-level checks (title non-empty, summary well-formed) delegate
+        // to glance_catalog::structural::Hero -- the same rule, one place.
+        // `hero.stats` 2-4 cap is glance's own display-band choice
+        // (glance_catalog's Hero deliberately has no upper bound, see that
+        // crate's doc comment), so it's layered on top here, not inside the
+        // shared validator.
+        to_catalog_hero(self)
+            .validate()
+            .map_err(|error| SpecError::new(error.to_string()))?;
         if !(2..=4).contains(&self.stats.len()) {
             return Err(SpecError::new("hero.stats must contain 2-4 stat chips"));
-        }
-        for stat in &self.stats {
-            if stat.label.trim().is_empty() || stat.value.trim().is_empty() {
-                return Err(SpecError::new("hero stat label and value are required"));
-            }
         }
         if let Some(request) = &self.image_request {
             request.validate()?;
         }
         Ok(())
+    }
+}
+
+fn to_catalog_hero(hero: &Hero) -> glance_catalog::structural::Hero {
+    glance_catalog::structural::Hero {
+        title: hero.title.clone(),
+        summary: to_catalog_inline_nodes(&hero.summary),
+        stats: hero.stats.iter().map(to_catalog_metric).collect(),
+        image_intent: None,
+    }
+}
+
+fn to_catalog_metric(stat: &StatChip) -> glance_catalog::leaf::Metric {
+    glance_catalog::leaf::Metric {
+        label: stat.label.clone(),
+        value: stat.value.clone(),
     }
 }
 
@@ -212,6 +270,12 @@ impl Narrative {
     }
 }
 
+/// Wire shape stays `path` + `lines` (see the module doc comment); converts
+/// to `glance_catalog::InlineNode` for validation only, via
+/// `to_catalog_inline_nodes`. Rendering stays local (`render_inline_nodes`
+/// below) so the citation popover keeps its `data-cite-label` attribute and
+/// `glance-cite` class, which `glance_catalog`'s `Cite` renderer doesn't
+/// produce.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InlineNode {
@@ -227,6 +291,53 @@ pub enum InlineNode {
         text: String,
         href: String,
     },
+}
+
+fn to_catalog_inline_node(node: &InlineNode) -> glance_catalog::InlineNode {
+    match node {
+        InlineNode::Text { text } => glance_catalog::InlineNode::Text { text: text.clone() },
+        InlineNode::Link { text, href } => glance_catalog::InlineNode::Link {
+            text: text.clone(),
+            href: href.clone(),
+        },
+        InlineNode::Cite { text, path, lines } => glance_catalog::InlineNode::Cite {
+            text: text.clone(),
+            ref_id: format!("{path}:{lines}"),
+        },
+    }
+}
+
+fn to_catalog_inline_nodes(nodes: &[InlineNode]) -> Vec<glance_catalog::InlineNode> {
+    nodes.iter().map(to_catalog_inline_node).collect()
+}
+
+fn render_inline_nodes(nodes: &[InlineNode], context: &RenderContext<'_>) -> String {
+    nodes
+        .iter()
+        .map(|node| render_inline_node(node, context))
+        .collect()
+}
+
+fn render_inline_node(node: &InlineNode, context: &RenderContext<'_>) -> String {
+    match node {
+        InlineNode::Text { text } => html_escape(text),
+        InlineNode::Link { text, href } => format!(
+            r#"<a href="{}">{}</a>"#,
+            html_escape(href),
+            html_escape(text)
+        ),
+        InlineNode::Cite { text, path, lines } => {
+            let raw = format!("{path}:{lines}");
+            let href = source_href(context, path, lines);
+            format!(
+                r#"<a class="glance-cite" data-glance-cite="{}" data-cite-label="{}" href="{}">{}</a>"#,
+                html_escape(&raw),
+                html_escape(&raw),
+                html_escape(&href),
+                html_escape(text)
+            )
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +400,8 @@ pub struct FlowEdge {
     pub label: Option<String>,
 }
 
+/// Kept as glance-gen's own type rather than mapped onto
+/// `glance_catalog::structural::Table` -- see the module doc comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileTable {
@@ -353,21 +466,45 @@ impl Callouts {
             return Err(SpecError::new("callouts.items is required"));
         }
         for item in &self.items {
-            if item.title.trim().is_empty() {
-                return Err(SpecError::new("callout title is required"));
-            }
-            validate_inline_nodes("callout.body", &item.body)?;
+            item.validate()?;
         }
         Ok(())
     }
 }
 
+/// Wire shape is glance-gen's own (`kind`/`title`/`body`); field validation
+/// delegates to `glance_catalog::leaf::Callout` via `to_catalog_callout`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Callout {
     pub kind: CalloutKind,
     pub title: String,
     pub body: Vec<InlineNode>,
+}
+
+impl Callout {
+    fn validate(&self) -> Result<(), SpecError> {
+        to_catalog_callout(self)
+            .validate()
+            .map_err(|error| SpecError::new(error.to_string()))
+    }
+}
+
+fn to_catalog_callout(callout: &Callout) -> glance_catalog::leaf::Callout {
+    glance_catalog::leaf::Callout {
+        kind: to_catalog_callout_kind(callout.kind),
+        title: callout.title.clone(),
+        body: to_catalog_inline_nodes(&callout.body),
+    }
+}
+
+fn to_catalog_callout_kind(kind: CalloutKind) -> glance_catalog::leaf::CalloutKind {
+    match kind {
+        CalloutKind::Seam => glance_catalog::leaf::CalloutKind::Seam,
+        CalloutKind::Hurt => glance_catalog::leaf::CalloutKind::Hurt,
+        CalloutKind::Invariant => glance_catalog::leaf::CalloutKind::Invariant,
+        CalloutKind::Contract => glance_catalog::leaf::CalloutKind::Contract,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -678,6 +815,9 @@ fn render_component(
     }
 }
 
+/// Rendering stays local -- see the module doc comment; field validation
+/// still delegates to `glance_catalog::structural::Hero::validate` via
+/// `to_catalog_hero`.
 fn render_hero(hero: &Hero, context: &RenderContext<'_>, flow_edges: &str) -> String {
     let mut html = format!(
         r#"<section class="glance-component glance-hero" data-glance-component="hero" data-glance-section="what-this-is"><div class="glance-kicker">{}</div><h1>{}</h1><p class="glance-hero-summary">{}"#,
@@ -704,6 +844,9 @@ fn render_hero(hero: &Hero, context: &RenderContext<'_>, flow_edges: &str) -> St
     html
 }
 
+/// Rendering stays local to preserve `data-glance-section="role-in-the-whole"`
+/// -- unread by `distill_generated_page` today, kept for symmetry rather than
+/// silently dropping a marker some other reader may depend on.
 fn render_narrative(narrative: &Narrative, context: &RenderContext<'_>) -> String {
     let mut html = format!(
         r#"<section class="glance-component glance-narrative" data-glance-component="narrative" data-glance-section="role-in-the-whole"><h2 class="glance-section-title">{}</h2>"#,
@@ -816,6 +959,7 @@ fn assign_label_lanes(edges: &[(i32, i32, i32, i32, i32, &str)]) -> Vec<i32> {
     lanes
 }
 
+/// Rendering stays local -- see the module doc comment.
 fn render_file_table(table: &FileTable, context: &RenderContext<'_>) -> String {
     let mut html = String::from(
         r#"<section class="glance-component glance-file-table-section" data-glance-component="file_table" data-glance-section="composition"><h2 class="glance-section-title">Files to know</h2><div class="glance-table-wrap"><table class="glance-file-table"><tr><th class="kind">kind</th><th>name</th><th>role</th><th>signatures</th><th>gotcha</th></tr>"#,
@@ -869,6 +1013,9 @@ fn render_signatures(signatures: &[String]) -> String {
         .join("")
 }
 
+/// Rendering stays local -- see the module doc comment; title/body still
+/// validate through `glance_catalog::leaf::Callout::validate` (see
+/// `to_catalog_callout`).
 fn render_callouts(callouts: &Callouts, context: &RenderContext<'_>) -> String {
     let mut html = String::from(
         r#"<section class="glance-component glance-callouts" data-glance-component="callouts"><h2 class="glance-section-title">Seams and sharp edges</h2><div class="glance-callout-grid">"#,
@@ -941,37 +1088,6 @@ fn render_custom_html(custom: &CustomHtml, _nested: bool) -> String {
         html_escape(&custom.title),
         html_escape(&custom.html)
     )
-}
-
-fn render_inline_nodes(nodes: &[InlineNode], context: &RenderContext<'_>) -> String {
-    nodes
-        .iter()
-        .map(|node| render_inline_node(node, Some(context)))
-        .collect::<String>()
-}
-
-fn render_inline_node(node: &InlineNode, context: Option<&RenderContext<'_>>) -> String {
-    match node {
-        InlineNode::Text { text } => html_escape(text),
-        InlineNode::Link { text, href } => format!(
-            r#"<a href="{}">{}</a>"#,
-            html_escape(href),
-            html_escape(text)
-        ),
-        InlineNode::Cite { text, path, lines } => {
-            let raw = format!("{path}:{lines}");
-            let href = context
-                .map(|context| source_href(context, path, lines))
-                .unwrap_or_else(|| format!("#source-{}", slugify(&raw)));
-            format!(
-                r#"<a class="glance-cite" data-glance-cite="{}" data-cite-label="{}" href="{}">{}</a>"#,
-                html_escape(&raw),
-                html_escape(&raw),
-                html_escape(&href),
-                html_escape(text)
-            )
-        }
-    }
 }
 
 fn compose_image_prompt(
@@ -1063,25 +1179,14 @@ fn spec_flow_edges(spec: &PageSpec) -> String {
 }
 
 fn validate_inline_nodes(label: &str, nodes: &[InlineNode]) -> Result<(), SpecError> {
-    if nodes.is_empty() {
-        return Err(SpecError::new(format!("{label} cannot be empty")));
-    }
+    glance_catalog::inline::validate_inline_nodes(label, &to_catalog_inline_nodes(nodes))
+        .map_err(|error| SpecError::new(error.to_string()))?;
+    // glance_catalog's validator treats every Cite's ref_id as an opaque
+    // string; glance's own citation-range grammar (`path:start[-end][,...]`)
+    // is checked separately here, same as before.
     for node in nodes {
-        match node {
-            InlineNode::Text { .. } => {}
-            InlineNode::Link { text, href } => {
-                if text.trim().is_empty() || href.trim().is_empty() {
-                    return Err(SpecError::new(format!(
-                        "{label} link requires text and href"
-                    )));
-                }
-            }
-            InlineNode::Cite { text, path, lines } => {
-                if text.trim().is_empty() {
-                    return Err(SpecError::new(format!("{label} cite requires text")));
-                }
-                validate_citation(path, lines)?;
-            }
+        if let InlineNode::Cite { path, lines, .. } = node {
+            validate_citation(path, lines)?;
         }
     }
     Ok(())
@@ -1212,10 +1317,5 @@ fn slugify(value: &str) -> String {
 }
 
 fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    glance_catalog::inline::html_escape(value)
 }

@@ -480,6 +480,7 @@ name = "glance-gen"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "glance-catalog",
  "glance-check",
  "glance-core",
  "scraper",
