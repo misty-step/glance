@@ -18,6 +18,8 @@ use glance_publish::{GhSisterHost, PublishRequest, SourceRepo};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod canary;
+
 #[derive(Debug, Parser)]
 #[command(
     author,
@@ -102,6 +104,19 @@ struct GlanceConfig {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    canary::check_in();
+
+    let result = run(cli);
+
+    if let Err(error) = &result {
+        canary::report_error("glance-next.generate.failed", &error.to_string());
+    }
+    canary::flush();
+
+    result
+}
+
+fn run(cli: Cli) -> Result<()> {
     let config = load_config(&cli.config)?;
 
     match cli.command {
