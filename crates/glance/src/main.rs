@@ -84,6 +84,14 @@ enum Command {
         #[arg(long)]
         run_id: Option<String>,
     },
+    /// Hidden, debug-build-only affordance: panic on demand to exercise the
+    /// Canary panic hook end-to-end (`glance-next.panic` at the hub). Gated
+    /// on `debug_assertions` so it is compiled out of release/Fly builds and
+    /// hidden from `--help`; it exists solely as a live proof surface for the
+    /// otherwise CLI-unreachable panic path.
+    #[cfg(debug_assertions)]
+    #[command(name = "_debug-panic", hide = true)]
+    DebugPanic,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -103,6 +111,9 @@ struct GlanceConfig {
 }
 
 fn main() -> Result<()> {
+    canary::install_panic_hook();
+    init_tracing();
+
     let cli = Cli::parse();
     canary::check_in();
 
@@ -114,6 +125,21 @@ fn main() -> Result<()> {
     canary::flush();
 
     result
+}
+
+/// Register the fmt layer (human-readable stdout logging) alongside
+/// [`canary::CanaryLayer`] so every `tracing::error!` in the app or its
+/// libraries is both printed and forwarded to Canary with zero per-site
+/// wiring. `try_init` (not `init`) so a second call — e.g. from a test that
+/// also installs a subscriber — degrades to a no-op instead of panicking.
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let _ = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(canary::CanaryLayer)
+        .try_init();
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -158,6 +184,12 @@ fn run(cli: Cli) -> Result<()> {
             source_pr_title,
             run_id,
         }),
+        // The panic hook installed in `main` reports `glance-next.panic` and
+        // flushes the send before the default hook lets the process die (see
+        // `canary::install_panic_hook`). This arm is the only intentional
+        // panic in the binary and only exists in debug builds.
+        #[cfg(debug_assertions)]
+        Command::DebugPanic => panic!("glance-next canary-101 proof"),
     }
 }
 
@@ -412,8 +444,19 @@ fn run_generation(input: RunGenerationInput<'_>) -> Result<RunOutcome> {
                     image_report.skipped,
                     image_budget.remaining()
                 );
-                for message in image_report.messages {
+                for message in &image_report.messages {
                     println!("image_note={} {}", directory.display(), message);
+                    // Unlike page failures, an image failure never bails
+                    // the run — the page still ships with a fallback
+                    // figure — so it would otherwise be silent beyond this
+                    // stdout line. Report each one individually.
+                    if message.starts_with("failed image request") {
+                        tracing::error!(
+                            directory = %directory.display(),
+                            detail = %message,
+                            "glance-next image render failed"
+                        );
+                    }
                 }
             }
             if let Err(error) = write_generated_page(site_root, &directory, source_sha, kind, &page)
@@ -496,16 +539,29 @@ impl ImageProvider for DisabledImageProvider {
     }
 }
 
+/// Record one page's generation failure and, via `tracing::error!` +
+/// [`canary::CanaryLayer`], report it to Canary as an individual event — not
+/// just folded into the run's aggregate failure count. `error`'s `Display`
+/// already carries the specific cause (provider name, `BudgetExceeded`
+/// detail, validation message, ...), so no per-call-site formatting is
+/// needed; this single declaration covers every `record_run_failure` call
+/// site.
 fn record_run_failure<E: std::fmt::Display>(
     degraded_pages: &mut BTreeSet<PathBuf>,
     failures: &mut Vec<RunFailure>,
     directory: &Path,
     error: E,
 ) {
+    let message = error.to_string();
+    tracing::error!(
+        directory = %directory.display(),
+        error = %message,
+        "glance-next page generation failed"
+    );
     degraded_pages.insert(directory.to_path_buf());
     failures.push(RunFailure {
         directory: directory.to_path_buf(),
-        message: error.to_string(),
+        message,
     });
 }
 
@@ -903,6 +959,13 @@ fn serve_local_command(
     port: u16,
     once: bool,
 ) -> Result<()> {
+    // `serve-local` is the one standing-service mode in this binary: unlike
+    // the one-shot subcommands, it can run for hours, well past the 120s
+    // check-in TTL that `main`'s single startup `check_in()` covers. Without
+    // a continuous loop the monitor goes falsely `overdue` while the server
+    // is perfectly healthy.
+    canary::start_health_loop();
+
     let site_root = site_root
         .or_else(|| config.site_root.clone())
         .unwrap_or_else(|| PathBuf::from("site"));
@@ -1087,6 +1150,7 @@ fn collect_html_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn request_paths_reject_parent_traversal() {
@@ -1095,6 +1159,20 @@ mod tests {
             request_path_to_relative("/nested/index.html?x=1").expect("relative"),
             PathBuf::from("nested/index.html")
         );
+    }
+
+    // Locks the hidden panic affordance's wiring under debug builds without
+    // actually panicking (which would require a global-hook swap that races
+    // sibling parallel tests). The live panic + `glance-next.panic` report is
+    // proven out of band; here we only guarantee the subcommand keeps parsing
+    // to `DebugPanic`. In release builds the variant does not exist, so this
+    // test is compiled out alongside it.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_panic_subcommand_parses_to_debug_panic() {
+        let cli = Cli::try_parse_from(["glance", "_debug-panic"])
+            .expect("hidden _debug-panic subcommand parses in debug builds");
+        assert!(matches!(cli.command, Command::DebugPanic));
     }
 
     #[test]
@@ -1114,6 +1192,20 @@ mod tests {
 
     #[test]
     fn run_generation_continues_after_one_page_failure_and_records_degraded_parent() {
+        // Exercises `record_run_failure`, which now emits `tracing::error!`
+        // captured by the process-global `CanaryLayer` (see
+        // `canary::test_support::install_test_subscriber`). This test does
+        // not want to talk to Canary at all, but two things make that
+        // non-negotiable rather than incidental: (1) it must serialize on
+        // `env_lock` so it cannot run concurrently with a test that has set
+        // `CANARY_*`, or its error event could land in that test's one-shot
+        // mock server; (2) it must explicitly clear `CANARY_*` itself —
+        // the ambient shell environment is not guaranteed unset (verified
+        // live: this machine's dev shell carries real production
+        // `canary-obs.fly.dev` credentials), so relying on "nobody else set
+        // it" would silently fire a real report to production.
+        let _guard = canary::test_support::env_lock().lock().expect("env lock");
+        canary::test_support::clear_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         std::fs::create_dir(&source).expect("source");
@@ -1171,6 +1263,14 @@ mod tests {
 
     #[test]
     fn run_generation_rejects_out_of_range_citations_before_writing_page() {
+        // See the comment on the sibling `..._records_degraded_parent` test:
+        // this also drives `record_run_failure`'s `tracing::error!` and must
+        // serialize on `env_lock` *and* clear ambient `CANARY_*` itself to
+        // avoid leaking into another test's mock server or, worse, a real
+        // production endpoint if the ambient shell happens to carry live
+        // credentials.
+        let _guard = canary::test_support::env_lock().lock().expect("env lock");
+        canary::test_support::clear_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         std::fs::create_dir(&source).expect("source");
@@ -1211,6 +1311,13 @@ mod tests {
 
     #[test]
     fn mock_run_writes_navigation_links_that_resolve_to_generated_pages() {
+        // MockImageProvider's undersized image trips the same image-failure
+        // `tracing::error!` path exercised by
+        // `image_render_failure_reports_error_through_canary_layer`; see the
+        // comment on `..._records_degraded_parent` for why this must
+        // serialize on `env_lock` *and* clear ambient `CANARY_*` too.
+        let _guard = canary::test_support::env_lock().lock().expect("env lock");
+        canary::test_support::clear_test_env();
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../glance-core/tests/fixtures/mini-source");
         let snapshot = snapshot_tree(&source, "fixture-sha").expect("snapshot");
@@ -1269,6 +1376,84 @@ mod tests {
             .find(|page| page["directory"] == ".")
             .expect("root page");
         assert_eq!(root_page["image"]["spend_micros"], 0);
+    }
+
+    #[test]
+    fn record_run_failure_reports_individual_error_through_canary_layer() {
+        let _guard = canary::test_support::env_lock().lock().expect("env lock");
+        canary::test_support::install_test_subscriber();
+        let (endpoint, server, rx) = canary::test_support::one_shot_mock_server();
+        canary::test_support::set_test_env(&endpoint);
+
+        let mut degraded_pages = BTreeSet::new();
+        let mut failures = Vec::new();
+        record_run_failure(
+            &mut degraded_pages,
+            &mut failures,
+            Path::new("bad"),
+            glance_gen::GenerationError::BudgetExceeded {
+                message: "spend 999999 exceeds limit 100000".to_owned(),
+            },
+        );
+        canary::flush();
+        canary::test_support::clear_test_env();
+
+        let request = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("mock server received the per-page failure as a Canary error");
+        server.join().expect("server thread joins");
+
+        assert!(request.starts_with("POST /api/v1/errors HTTP/1.1"));
+        assert!(request.contains("bad"));
+        assert!(request.contains("generation budget exceeded"));
+        assert!(request.contains("spend 999999 exceeds limit 100000"));
+        assert_eq!(failures.len(), 1);
+        assert!(degraded_pages.contains(Path::new("bad")));
+    }
+
+    #[test]
+    fn image_render_failure_reports_error_through_canary_layer() {
+        let _guard = canary::test_support::env_lock().lock().expect("env lock");
+        canary::test_support::install_test_subscriber();
+        let (endpoint, server, rx) = canary::test_support::one_shot_mock_server();
+        canary::test_support::set_test_env(&endpoint);
+
+        // MockImageProvider deliberately returns an undersized image (see
+        // its doc comment in glance-gen), so any run that requests an image
+        // — the mini-source fixture's root page always does — takes the
+        // "too small to be a real asset" failure arm in
+        // `render_image_requests`, which previously only incremented a
+        // silent counter.
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../glance-core/tests/fixtures/mini-source");
+        let snapshot = snapshot_tree(&source, "fixture-sha").expect("snapshot");
+        let site = tempfile::tempdir().expect("site");
+        let config = GenerationConfig::default();
+        let existing_pages = BTreeMap::new();
+        let provider = MockProvider::with_routing(config.routing.clone());
+
+        run_generation(RunGenerationInput {
+            snapshot: &snapshot,
+            source_sha: "fixture-sha",
+            site_root: Some(site.path()),
+            routing: &config.routing,
+            prompt: &config.prompt,
+            image: &config.image,
+            provider: &provider,
+            image_provider: &MockImageProvider,
+            existing_pages: &existing_pages,
+        })
+        .expect("mock run completes even though the image request fails");
+        canary::flush();
+        canary::test_support::clear_test_env();
+
+        let request = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("mock server received the image failure as a Canary error");
+        server.join().expect("server thread joins");
+
+        assert!(request.starts_with("POST /api/v1/errors HTTP/1.1"));
+        assert!(request.contains("too small"));
     }
 
     #[cfg(unix)]

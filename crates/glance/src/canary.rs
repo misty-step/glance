@@ -1,11 +1,16 @@
 //! Fire-and-forget Canary self-reporter. No creds => silent no-op.
 //!
-//! `glance` is a short-lived CLI/build tool, not a standing service: there
-//! is no background health loop, only a [`check_in`] as early as possible in
-//! `main` and a [`report_error`] on the top-level failure path. Sends run on
-//! a detached thread so a Canary outage never slows or blocks generation,
-//! but the process must call [`flush`] before exit or the proof event may
-//! never leave the machine before the thread is torn down.
+//! `glance` is primarily a short-lived CLI/build tool: a [`check_in`] as
+//! early as possible in `main`, a [`report_error`] on the top-level failure
+//! path, and — via [`CanaryLayer`] — automatic capture of every
+//! `tracing::error!` anywhere in the app or its libraries. Sends run on a
+//! detached thread so a Canary outage never slows or blocks generation, but
+//! the process must call [`flush`] before exit or the proof event may never
+//! leave the machine before the thread is torn down.
+//!
+//! `glance serve-local` is the one standing-service mode in this binary: it
+//! calls [`start_health_loop`] so its monitor stays `alive` for the life of
+//! the server, not just at the one check-in `main` already sends.
 
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -15,6 +20,7 @@ const SERVICE: &str = "glance-next"; // overridable via CANARY_SERVICE
 const MONITOR: &str = "glance-next"; // must already exist in Canary
 const TTL_MS: u64 = 120_000;
 const SEND_TIMEOUT: Duration = Duration::from_secs(3);
+const CHECKIN_INTERVAL: Duration = Duration::from_secs(60);
 
 fn pending() -> &'static Mutex<Vec<JoinHandle<()>>> {
     static PENDING: OnceLock<Mutex<Vec<JoinHandle<()>>>> = OnceLock::new();
@@ -69,6 +75,110 @@ pub fn check_in() {
     spawn_send(endpoint, key, "/api/v1/check-ins", body);
 }
 
+/// Standing-service mode only (`serve-local`): fire a check-in immediately,
+/// then every [`CHECKIN_INTERVAL`] from a named background thread for the
+/// life of the process. Without this a long-running mode outlives the
+/// [`TTL_MS`] window between `main`'s one-shot [`check_in`] and going
+/// falsely `overdue` while perfectly healthy.
+pub fn start_health_loop() {
+    if config().is_none() {
+        return;
+    }
+    check_in();
+    let _ = std::thread::Builder::new()
+        .name("canary-health".into())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(CHECKIN_INTERVAL);
+                check_in();
+                // Bound `pending()` growth across a long-running loop: a
+                // standing service never reaches the short-lived `flush()`
+                // call at the end of `main`, so each tick reaps its own
+                // (and any other) finished send threads here instead of
+                // letting join handles accumulate for the process lifetime.
+                flush();
+            }
+        });
+}
+
+/// Install a process-wide panic hook that reports `<service>.panic` to
+/// Canary before running the previous (default) hook. Safe to call
+/// anywhere; a no-op without `CANARY_ENDPOINT`/`CANARY_API_KEY`.
+pub fn install_panic_hook() {
+    if config().is_none() {
+        return;
+    }
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_default();
+        let message = panic_payload_message(info.payload());
+        report_error(
+            &format!("{}.panic", service()),
+            &format!("{message} @ {location}"),
+        );
+        flush(); // best-effort before the process dies
+        default_hook(info);
+    }));
+}
+
+/// Extract a human-readable message from a panic payload. Panics carry
+/// either a `&str` (the common `panic!("literal")` case) or a `String` (the
+/// `panic!("{}", ...)` / `.expect(msg)` case); anything else has no useful
+/// `Display`, so it falls back to a generic label. Pulled out of
+/// [`install_panic_hook`]'s closure so the formatting logic is unit
+/// testable without installing a process-global hook.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".to_owned())
+}
+
+/// A `tracing_subscriber::Layer` that forwards every `ERROR`-level event to
+/// [`report_error`]. Registering this once at process start turns "app
+/// logging" into "error capture": any `tracing::error!(...)` anywhere in
+/// `glance` or the crates it depends on lands in Canary with zero per-site
+/// wiring. A no-op per event without `CANARY_ENDPOINT`/`CANARY_API_KEY`.
+pub struct CanaryLayer;
+
+impl<S> tracing_subscriber::Layer<S> for CanaryLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if config().is_none() || *event.metadata().level() != tracing::Level::ERROR {
+            return;
+        }
+        let mut message = String::new();
+        event.record(&mut EventVisitor(&mut message));
+        let error_class = format!("{}.{}", service(), event.metadata().target());
+        report_error(&error_class, &message);
+    }
+}
+
+struct EventVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for EventVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if !self.0.is_empty() {
+            self.0.push(' ');
+        }
+        if field.name() == "message" {
+            self.0.push_str(&format!("{value:?}"));
+        } else {
+            self.0.push_str(&format!("{}={:?}", field.name(), value));
+        }
+    }
+}
+
 /// Wait for any in-flight Canary sends to finish. `glance` is a short-lived
 /// process: without this, the detached send thread from [`check_in`] or
 /// [`report_error`] can be killed mid-flight by process exit before the
@@ -111,20 +221,24 @@ fn spawn_send(endpoint: String, key: String, path: &'static str, body: serde_jso
     }
 }
 
+/// Shared test infrastructure — a real one-shot mock HTTP server plus
+/// serialized env-var mutation — used by this module's own tests and (via
+/// `pub(crate)`) by `main.rs`'s tests, which need the same mock server to
+/// prove `record_run_failure` and image-render failures actually reach
+/// [`CanaryLayer`].
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc;
-    use std::time::Instant;
 
-    fn env_lock() -> &'static Mutex<()> {
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn set_test_env(endpoint: &str) {
+    pub(crate) fn set_test_env(endpoint: &str) {
         // SAFETY: every test that mutates process env serializes on
         // `env_lock` for its whole env-touching window, so no other thread
         // observes a torn read/write of these vars.
@@ -134,7 +248,7 @@ mod tests {
         }
     }
 
-    fn clear_test_env() {
+    pub(crate) fn clear_test_env() {
         // SAFETY: see `set_test_env`.
         unsafe {
             std::env::remove_var("CANARY_ENDPOINT");
@@ -183,7 +297,7 @@ mod tests {
     /// Spawn a one-shot mock server that captures the first request it
     /// receives, replies 200, and hands the raw request text back over the
     /// returned channel.
-    fn one_shot_mock_server() -> (String, JoinHandle<()>, mpsc::Receiver<String>) {
+    pub(crate) fn one_shot_mock_server() -> (String, JoinHandle<()>, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().expect("local addr");
         let (tx, rx) = mpsc::channel();
@@ -200,6 +314,48 @@ mod tests {
 
         (format!("http://{addr}"), server, rx)
     }
+
+    /// Install [`CanaryLayer`](super::CanaryLayer) as the **global** default
+    /// tracing subscriber, exactly once for the life of the test binary.
+    ///
+    /// A per-test `tracing::subscriber::with_default` (thread-local scoping)
+    /// looks like the natural fit for test isolation, but `cargo test` runs
+    /// many unrelated tests concurrently on other threads that also emit
+    /// `tracing::error!` (e.g. any test exercising `run_generation`'s
+    /// failure paths). `tracing-core` caches each callsite's `Interest`
+    /// process-wide and only invalidates it when a dispatch changes; two
+    /// threads independently entering/leaving scoped subscribers around the
+    /// same moment can race that cache and cause a real event to be
+    /// silently dropped — reproduced empirically, not from a hunch: this
+    /// module's forwarding test was flaky *only* when run alongside another
+    /// `run_generation`-exercising test under the default parallel harness.
+    /// A single global subscriber, installed once, removes the race
+    /// entirely and matches production (`main()` also installs one
+    /// subscriber, once). Gating stays on [`config`](super::config) — the
+    /// same env-var check every other test already serializes on via
+    /// [`env_lock`] — so tests that never touch `CANARY_*` env vars remain
+    /// unaffected no matter when this fires relative to them.
+    pub(crate) fn install_test_subscriber() {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::registry()
+                .with(super::CanaryLayer)
+                .try_init();
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{
+        clear_test_env, env_lock, install_test_subscriber, one_shot_mock_server, set_test_env,
+    };
+    use super::*;
+    use std::net::TcpListener;
+    use std::time::Instant;
 
     #[test]
     fn report_error_sends_expected_request_to_mock_server() {
@@ -272,5 +428,67 @@ mod tests {
         let _guard = env_lock().lock().expect("env lock");
         clear_test_env();
         assert!(config().is_none());
+    }
+
+    #[test]
+    fn canary_layer_forwards_tracing_error_to_mock_server() {
+        let _guard = env_lock().lock().expect("env lock");
+        install_test_subscriber();
+        let (endpoint, server, rx) = one_shot_mock_server();
+        set_test_env(&endpoint);
+
+        tracing::error!(directory = "src/parser", "boom from a page failure");
+        flush();
+        clear_test_env();
+
+        let request = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("mock server received the tracing::error! forwarded as a Canary error");
+        server.join().expect("server thread joins");
+
+        assert!(request.starts_with("POST /api/v1/errors HTTP/1.1"));
+        assert!(request.contains("\"service\":\"glance-next\""));
+        // error_class = "<service>.<tracing target>"; target defaults to
+        // this test module's path, so the class carries provenance without
+        // any per-call-site wiring.
+        assert!(request.contains("\"error_class\":\"glance-next.glance::canary::tests\""));
+        assert!(request.contains("boom from a page failure"));
+        assert!(request.contains("directory=\\\"src/parser\\\""));
+    }
+
+    #[test]
+    fn canary_layer_ignores_non_error_events() {
+        let _guard = env_lock().lock().expect("env lock");
+        install_test_subscriber();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let addr = listener.local_addr().expect("local addr");
+        set_test_env(&format!("http://{addr}"));
+
+        tracing::warn!("not an error, must not be reported");
+        tracing::info!("also not an error");
+        flush();
+        clear_test_env();
+
+        // Nothing was sent: connecting with a short timeout must time out
+        // rather than succeed, proving the layer emitted no request.
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        assert!(
+            listener.accept().is_err(),
+            "CanaryLayer must not forward WARN/INFO events to Canary"
+        );
+    }
+
+    #[test]
+    fn panic_payload_message_extracts_str_and_string_payloads() {
+        let str_payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+        assert_eq!(panic_payload_message(str_payload.as_ref()), "boom");
+
+        let string_payload: Box<dyn std::any::Any + Send> = Box::new(String::from("kaboom"));
+        assert_eq!(panic_payload_message(string_payload.as_ref()), "kaboom");
+
+        let opaque_payload: Box<dyn std::any::Any + Send> = Box::new(42_i32);
+        assert_eq!(panic_payload_message(opaque_payload.as_ref()), "panic");
     }
 }
