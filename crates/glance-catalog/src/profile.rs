@@ -115,6 +115,7 @@ mod tests {
             summary: vec![InlineNode::Text { text: "s".into() }],
             stats: vec![],
             image_intent: None,
+            attrs: std::collections::BTreeMap::new(),
         })
     }
 

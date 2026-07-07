@@ -13,10 +13,10 @@
 use chrono::{DateTime, Utc};
 
 use crate::component::Component;
-use crate::inline::{html_escape, render_inline_nodes};
+use crate::inline::{CiteRender, html_escape, render_inline_nodes_styled};
 use crate::leaf::{Callout, Code, Diff, Image, Markdown, Mermaid, Metric, Terminal};
 use crate::structural::{
-    Disclosure, Hero, Narrative, NarrativeStatus, Table, Timeline, render_cell,
+    Disclosure, Hero, Narrative, NarrativeStatus, Table, Timeline, render_attrs, render_cell,
 };
 use crate::time::relative_time;
 
@@ -28,6 +28,25 @@ pub struct RenderContext<'a> {
     /// Resolves a `Cite` node's opaque `ref_id` to a concrete href. See
     /// `crate::inline` for why this is a callback, not a struct field.
     pub cite_href: &'a dyn Fn(&str) -> String,
+    /// Overrides the `Cite` anchor's CSS class (default `ae-cite` when
+    /// `None`). See `crate::inline::CiteRender`.
+    #[allow(clippy::struct_field_names)]
+    pub cite_class: Option<&'a str>,
+    /// Resolves a `Cite` node's `ref_id` to a `data-cite-label` popover
+    /// value (the attribute is omitted entirely when `None`). See
+    /// `crate::inline::CiteRender`.
+    pub cite_label: Option<&'a dyn Fn(&str) -> String>,
+}
+
+impl<'a> RenderContext<'a> {
+    fn cite(&self) -> CiteRender<'a> {
+        let mut cite = CiteRender::new(self.cite_href);
+        if let Some(class) = self.cite_class {
+            cite.class = class;
+        }
+        cite.label = self.cite_label;
+        cite
+    }
 }
 
 pub fn render_component(component: &Component, ctx: &RenderContext<'_>) -> String {
@@ -112,18 +131,20 @@ fn render_metric(metric: &Metric) -> String {
 
 fn render_callout(callout: &Callout, ctx: &RenderContext<'_>) -> String {
     format!(
-        r#"<article class="ae-callout" data-glance-component="callout" data-kind="{}"><h3>{}</h3><p>{}</p></article>"#,
+        r#"<article class="ae-callout" data-glance-component="callout" data-kind="{}"{}><h3>{}</h3><p>{}</p></article>"#,
         callout.kind.as_str(),
+        render_attrs(&callout.attrs),
         html_escape(&callout.title),
-        render_inline_nodes(&callout.body, ctx.cite_href)
+        render_inline_nodes_styled(&callout.body, &ctx.cite())
     )
 }
 
 fn render_hero(hero: &Hero, ctx: &RenderContext<'_>) -> String {
     let mut html = format!(
-        r#"<header class="ae-hero" data-glance-component="hero"><h1 class="ae-strong">{}</h1><p class="ae-dim">{}</p>"#,
+        r#"<header class="ae-hero" data-glance-component="hero"{}><h1 class="ae-strong">{}</h1><p class="ae-dim">{}</p>"#,
+        render_attrs(&hero.attrs),
         html_escape(&hero.title),
-        render_inline_nodes(&hero.summary, ctx.cite_href)
+        render_inline_nodes_styled(&hero.summary, &ctx.cite())
     );
     if !hero.stats.is_empty() {
         html.push_str(r#"<div class="ae-stat-badges">"#);
@@ -143,14 +164,15 @@ fn render_hero(hero: &Hero, ctx: &RenderContext<'_>) -> String {
 fn render_narrative(narrative: &Narrative, ctx: &RenderContext<'_>) -> String {
     let body = match &narrative.status {
         NarrativeStatus::Ok { paragraphs } => {
-            crate::structural::render_narrative_paragraphs(paragraphs, ctx.cite_href)
+            crate::structural::render_narrative_paragraphs(paragraphs, &ctx.cite())
         }
         // The fail-open reason is diagnosability detail, not reader
         // content -- it never reaches this banner (aesthetic-927 finding #6).
         NarrativeStatus::Unavailable { reason: _ } => r#"<p class="ae-dim">Narrative synthesis unavailable this run. Showing the deterministic sections below.</p>"#.to_string(),
     };
     format!(
-        r#"<section class="ae-section" data-glance-component="narrative"><h2>{}</h2>{body}</section>"#,
+        r#"<section class="ae-section" data-glance-component="narrative"{}><h2>{}</h2>{body}</section>"#,
+        render_attrs(&narrative.attrs),
         html_escape(&narrative.heading)
     )
 }
@@ -169,7 +191,8 @@ fn render_table(table: &Table) -> String {
             .map(|note| format!(r#"<p class="ae-dim">{}</p>"#, html_escape(note)))
             .unwrap_or_default();
         return format!(
-            r#"<section class="ae-section" data-glance-component="table"><h2>{}</h2><p class="ae-dim">{}</p>{demoted}</section>"#,
+            r#"<section class="ae-section" data-glance-component="table"{}><h2>{}</h2><p class="ae-dim">{}</p>{demoted}</section>"#,
+            render_attrs(&table.attrs),
             html_escape(&table.heading),
             html_escape(note)
         );
@@ -210,7 +233,7 @@ fn render_table(table: &Table) -> String {
                     format!("<td{class}>{value}</td>")
                 })
                 .collect();
-            format!("<tr>{cells}</tr>")
+            format!("<tr{}>{cells}</tr>", render_attrs(&row.attrs))
         })
         .collect();
     let demoted = table
@@ -219,7 +242,8 @@ fn render_table(table: &Table) -> String {
         .map(|note| format!(r#"<p class="ae-dim">{}</p>"#, html_escape(note)))
         .unwrap_or_default();
     format!(
-        r#"<section class="ae-section" data-glance-component="table"><h2>{}</h2><div class="ae-plate"><table class="ae-table"><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table></div>{demoted}</section>"#,
+        r#"<section class="ae-section" data-glance-component="table"{}><h2>{}</h2><div class="ae-plate"><table class="ae-table"><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table></div>{demoted}</section>"#,
+        render_attrs(&table.attrs),
         html_escape(&table.heading)
     )
 }
@@ -251,7 +275,7 @@ fn render_timeline(timeline: &Timeline, ctx: &RenderContext<'_>) -> String {
             } else {
                 format!(
                     r#"<details class="ae-trail-detail"><summary>detail</summary>{}</details>"#,
-                    render_inline_nodes(&entry.detail, ctx.cite_href)
+                    render_inline_nodes_styled(&entry.detail, &ctx.cite())
                 )
             };
             format!(
@@ -284,6 +308,8 @@ fn render_disclosure(disclosure: &Disclosure, ctx: &RenderContext<'_>) -> String
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::inline::InlineNode;
     use crate::leaf::CalloutKind;
@@ -295,6 +321,8 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             cite_href: &|ref_id| format!("#cite-{ref_id}"),
+            cite_class: None,
+            cite_label: None,
         }
     }
 
@@ -331,6 +359,7 @@ mod tests {
                 kind: CalloutKind::Hurt,
                 title: "sharp edge".into(),
                 body: vec![InlineNode::Text { text: "ok".into() }],
+                attrs: BTreeMap::new(),
             }),
         ];
         for component in &components {
@@ -358,10 +387,34 @@ mod tests {
                 value: "3".into(),
             }],
             image_intent: None,
+            attrs: BTreeMap::new(),
         });
         let html = render_component(&hero, &ctx());
         assert!(html.contains("Fleet retro"));
         assert!(html.contains("ae-stat-badges"));
+    }
+
+    #[test]
+    fn hero_attrs_render_as_extra_attributes_on_the_wrapper() {
+        // Regression proof for the generic extension point glance-928 adds:
+        // a consumer attaches its own attribute (e.g. glance-gen's
+        // `data-glance-section`) without this crate knowing what it means.
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "data-glance-section".to_string(),
+            "what-this-is".to_string(),
+        );
+        let hero = Component::Hero(Hero {
+            title: "Fleet retro".into(),
+            summary: vec![InlineNode::Text {
+                text: "24h ending now".into(),
+            }],
+            stats: vec![],
+            image_intent: None,
+            attrs,
+        });
+        let html = render_component(&hero, &ctx());
+        assert!(html.contains(r#"data-glance-section="what-this-is""#));
     }
 
     #[test]
@@ -395,14 +448,57 @@ mod tests {
                         value: CellValue::Text { text: "5".into() },
                     },
                 ],
+                attrs: BTreeMap::new(),
             }],
             empty_note: None,
             demoted_note: None,
+            attrs: BTreeMap::new(),
         });
         let html = render_component(&table, &ctx());
         assert!(html.contains("ae-table"));
         assert!(html.contains("landmark"));
         assert!(html.contains(r#"<td class="num">5</td>"#));
+    }
+
+    #[test]
+    fn row_attrs_render_on_the_tr_and_table_attrs_render_on_the_section() {
+        // Regression proof: glance-gen's FileTable marks a row with its own
+        // `data-glance-cite` (the citation gate scans `[data-glance-cite]`
+        // on any element) and the table section with `data-glance-section`
+        // -- both generic passthrough, no glance vocabulary in this crate.
+        let mut row_attrs = BTreeMap::new();
+        row_attrs.insert(
+            "data-glance-cite".to_string(),
+            "crates/glance-gen/src/spec.rs:1-2".to_string(),
+        );
+        let mut table_attrs = BTreeMap::new();
+        table_attrs.insert("data-glance-section".to_string(), "composition".to_string());
+        let table = Component::Table(Table {
+            heading: "Files to know".into(),
+            columns: vec![ColumnSpec {
+                key: "name".into(),
+                label: "name".into(),
+                numeric: false,
+                emphasize: false,
+            }],
+            rows: vec![Row {
+                cells: vec![Cell {
+                    column_key: "name".into(),
+                    value: CellValue::Link {
+                        text: "src".into(),
+                        href: "src/index.html".into(),
+                    },
+                }],
+                attrs: row_attrs,
+            }],
+            empty_note: None,
+            demoted_note: None,
+            attrs: table_attrs,
+        });
+        let html = render_component(&table, &ctx());
+        assert!(html.contains(r#"data-glance-section="composition""#));
+        assert!(html.contains(r#"data-glance-cite="crates/glance-gen/src/spec.rs:1-2""#));
+        assert!(html.contains(r#"<a href="src/index.html">src</a>"#));
     }
 
     #[test]
@@ -423,6 +519,7 @@ mod tests {
             rows: vec![],
             empty_note: Some("No repo activity in this window.".into()),
             demoted_note: Some("2 repo(s) swept with no activity: glass, canary".into()),
+            attrs: BTreeMap::new(),
         });
         let html = render_component(&table, &ctx());
         assert!(html.contains("No repo activity in this window."));
@@ -468,9 +565,51 @@ mod tests {
             summary: vec![InlineNode::Text { text: "s".into() }],
             stats: vec![],
             image_intent: None,
+            attrs: BTreeMap::new(),
         });
         let html = render_component(&hero, &ctx());
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn cite_class_and_label_are_overridable_and_omitted_by_default() {
+        // Regression proof for the generic Cite passthrough glance-928
+        // adds: default rendering stays `ae-cite` with no popover label;
+        // a consumer that opts in gets its own class + a data-cite-label
+        // attribute, without this crate hardcoding a glance-specific shape.
+        let default_ctx = ctx();
+        let cite_only = vec![InlineNode::Cite {
+            text: "the spec".into(),
+            ref_id: "crates/glance-gen/src/spec.rs:1-10".into(),
+        }];
+        let hero_default = Hero {
+            title: "t".into(),
+            summary: cite_only.clone(),
+            stats: vec![],
+            image_intent: None,
+            attrs: BTreeMap::new(),
+        };
+        let default_html = render_component(&Component::Hero(hero_default), &default_ctx);
+        assert!(default_html.contains(r#"class="ae-cite""#));
+        assert!(!default_html.contains("data-cite-label"));
+
+        let label_fn = |ref_id: &str| ref_id.to_string();
+        let styled_ctx = RenderContext {
+            now: default_ctx.now,
+            cite_href: default_ctx.cite_href,
+            cite_class: Some("glance-cite"),
+            cite_label: Some(&label_fn),
+        };
+        let hero_styled = Hero {
+            title: "t".into(),
+            summary: cite_only,
+            stats: vec![],
+            image_intent: None,
+            attrs: BTreeMap::new(),
+        };
+        let styled_html = render_component(&Component::Hero(hero_styled), &styled_ctx);
+        assert!(styled_html.contains(r#"class="glance-cite""#));
+        assert!(styled_html.contains(r#"data-cite-label="crates/glance-gen/src/spec.rs:1-10""#));
     }
 }

@@ -4,6 +4,11 @@
   "title": "Aesthetic Report Component Catalog v001",
   "description": "aesthetic-926: two-tier catalog -- 8 leaf content primitives (Sideshow-proven) + 5 structural report-grammar primitives (glance-next/fleet-retro-proven). One Component per element of a components array; ordering rules are a per-consumer LayoutProfile concern, not encoded here (see crates/glance-catalog/src/profile.rs).",
   "$defs": {
+    "attrs_map": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Generic extra HTML attributes rendered on the component's wrapper tag (or, on a table row, the <tr>) -- e.g. a consumer's own data-* attribute. This crate does not interpret keys or values; see crates/glance-catalog/src/structural.rs::render_attrs."
+    },
     "inline_node": {
       "oneOf": [
         {
@@ -126,7 +131,8 @@
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/inline_node" }
-        }
+        },
+        "attrs": { "$ref": "#/$defs/attrs_map" }
       }
     },
     "hero": {
@@ -145,7 +151,8 @@
           "type": "array",
           "items": { "$ref": "#/$defs/metric" }
         },
-        "image_intent": { "type": "string" }
+        "image_intent": { "type": "string" },
+        "attrs": { "$ref": "#/$defs/attrs_map" }
       }
     },
     "narrative": {
@@ -184,7 +191,8 @@
               }
             }
           ]
-        }
+        },
+        "attrs": { "$ref": "#/$defs/attrs_map" }
       }
     },
     "table_cell_value": {
@@ -264,7 +272,8 @@
                     "value": { "$ref": "#/$defs/table_cell_value" }
                   }
                 }
-              }
+              },
+              "attrs": { "$ref": "#/$defs/attrs_map" }
             }
           }
         },
@@ -272,7 +281,8 @@
           "type": "string",
           "description": "Required by the Rust validator when rows is empty -- not expressible as a static JSON Schema conditional without duplicating the rows arity, so this is enforced in Table::validate instead."
         },
-        "demoted_note": { "type": "string" }
+        "demoted_note": { "type": "string" },
+        "attrs": { "$ref": "#/$defs/attrs_map" }
       }
     },
     "timeline": {
