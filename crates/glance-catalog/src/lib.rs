@@ -20,6 +20,7 @@
 //! second implementation exists to merge with.
 
 pub mod component;
+pub mod document;
 pub mod inline;
 pub mod leaf;
 pub mod profile;
@@ -28,6 +29,7 @@ pub mod structural;
 pub mod time;
 
 pub use component::{CATALOG_VERSION, CatalogError, Component, KIND_NAMES, Tier};
+pub use document::{CatalogDocument, DocumentError, LayoutProfileName};
 pub use inline::InlineNode;
 pub use profile::{LayoutProfile, REPORT, STREAM, validate_layout};
 pub use render::{RenderContext, render_component};

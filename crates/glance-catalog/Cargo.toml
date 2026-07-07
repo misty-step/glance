@@ -9,7 +9,11 @@ description = "Shared two-tier report component catalog (aesthetic-926): leaf co
 
 [dependencies]
 chrono.workspace = true
+glance-check = { path = "../glance-check" }
 pulldown-cmark = "0.13"
 serde.workspace = true
 serde_json = "1"
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

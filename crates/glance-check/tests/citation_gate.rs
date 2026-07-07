@@ -312,6 +312,45 @@ fn rejects_missing_files_and_missing_line_ranges() {
     );
 }
 
+#[test]
+fn check_citations_accepts_a_non_glance_shaped_document_that_check_html_would_reject() {
+    // A generic glance-catalog producer (e.g. glance-929's CLI seam) renders
+    // documents with no hero/navigation at all -- `check_html`'s page-contract
+    // and navigation rules are glance-gen's own page shape, not a property
+    // every catalog consumer's output has. `check_citations` reuses only the
+    // citation-parse-and-resolve gate, so a bare cited paragraph still passes.
+    let (repo, sha) = committed_source_repo();
+    // Declares itself a catalog page (so `validate_page_contract` actually
+    // runs, per its own early-return guard) but has no hero -- a shape a
+    // generic catalog document (e.g. fleet-retro's report) may legitimately
+    // have, since hero-first is glance-gen's own page contract, not this
+    // crate's.
+    let html = r#"<!doctype html><html data-glance-catalog-version="x"><body><p data-glance-cite="README.md:1-3">no hero, no nav</p></body></html>"#;
+
+    let failures = CitationChecker::new(repo.path(), sha.clone())
+        .check_citations(html)
+        .expect("well-formed citation attribute");
+
+    assert!(failures.is_empty(), "{failures:#?}");
+
+    // The full gate rejects the same document for missing hero/page contract.
+    let report = CitationChecker::new(repo.path(), sha).check_html(html);
+    assert!(!report.page_contract_failures.is_empty());
+}
+
+#[test]
+fn check_citations_still_fails_closed_on_a_missing_file() {
+    let (repo, sha) = committed_source_repo();
+    let html = r#"<!doctype html><p data-glance-cite="missing.rs:1-2">bad citation</p>"#;
+
+    let failures = CitationChecker::new(repo.path(), sha)
+        .check_citations(html)
+        .expect("well-formed citation attribute");
+
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("missing.rs"));
+}
+
 fn committed_source_repo() -> (tempfile::TempDir, String) {
     let temp = tempfile::tempdir().expect("tempdir");
     copy_dir(&fixture_dir().join("source"), temp.path()).expect("copy source");
