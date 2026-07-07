@@ -56,6 +56,16 @@
         "value": { "type": "string", "minLength": 1 }
       }
     },
+    "metric_bare": {
+      "description": "Same shape as metric, minus the type tag -- used only where a Metric is a plain Rust struct field (Hero.stats: Vec<Metric>), not a Component enum variant. The enum tag only exists where serde's externally-tagged Component wraps a Metric as a standalone catalog element; aesthetic-929's prompt-kit worked example caught the drift where this def pointed at metric (type required) and the Rust deserializer rejected the tag as an unknown field.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
     "markdown": {
       "type": "object",
       "additionalProperties": false,
@@ -149,7 +159,7 @@
         },
         "stats": {
           "type": "array",
-          "items": { "$ref": "#/$defs/metric" }
+          "items": { "$ref": "#/$defs/metric_bare" }
         },
         "image_intent": { "type": "string" },
         "attrs": { "$ref": "#/$defs/attrs_map" }
@@ -351,6 +361,14 @@
   "required": ["catalog_version", "components"],
   "properties": {
     "catalog_version": { "const": "aesthetic-catalog-001" },
+    "title": {
+      "type": "string",
+      "description": "Rendered as the document's <title> (glance-929's CatalogDocument); falls back to a generic title when omitted."
+    },
+    "layout_profile": {
+      "enum": ["stream", "report"],
+      "description": "Selects crate::profile::STREAM or ::REPORT (glance-929's CatalogDocument); defaults to report when omitted."
+    },
     "components": {
       "type": "array",
       "items": { "$ref": "#/$defs/component" }

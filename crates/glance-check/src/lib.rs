@@ -205,6 +205,24 @@ impl CitationChecker {
         }
     }
 
+    /// Runs only the citation-parse-and-resolve gate: no navigation or
+    /// page-order checks. `check_html` bundles all three because they're all
+    /// true of glance-gen's own page shape; a generic glance-catalog
+    /// producer (glance-929's CLI seam) has no hero/breadcrumb/disclosure
+    /// contract to satisfy, only citations that must resolve against the
+    /// pinned source -- this is the piece such a producer reuses instead of
+    /// re-implementing citation verification.
+    pub fn check_citations(&self, html: &str) -> Result<Vec<CitationFailure>, CheckError> {
+        let citations = Citation::from_html(html)?;
+        Ok(citations
+            .into_iter()
+            .filter_map(|citation| match self.verify_citation(&citation) {
+                Ok(()) => None,
+                Err(message) => Some(CitationFailure { citation, message }),
+            })
+            .collect())
+    }
+
     pub fn check_html_file(&self, path: impl AsRef<Path>) -> Result<CheckReport, CheckError> {
         let path = path.as_ref();
         let html = std::fs::read_to_string(path).map_err(|source| CheckError::Io {

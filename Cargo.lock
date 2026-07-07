@@ -450,9 +450,11 @@ name = "glance-catalog"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "glance-check",
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
