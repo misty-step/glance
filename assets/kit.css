@@ -127,7 +127,7 @@ img, svg, iframe { max-width: 100%; }
   font: 13px/1.35 var(--glance-mono);
   text-transform: uppercase;
 }
-.glance-hero h1, .glance-section-title, .glance-disclosure summary {
+.glance-section-title, .glance-disclosure summary {
   margin: 0;
   color: var(--glance-ink);
   font-size: 16px;
@@ -135,22 +135,67 @@ img, svg, iframe { max-width: 100%; }
   font-weight: 800;
   overflow-wrap: anywhere;
 }
-.glance-hero-summary, .glance-narrative p, .glance-callout p, .glance-flow-copy {
+.glance-flow-copy {
   max-width: 76ch;
   margin: 0;
   color: var(--glance-ink);
   overflow-wrap: anywhere;
 }
-.glance-stat-band {
+
+/* glance-928: Hero/Narrative/Table/Callout now render through
+   crates/glance-catalog's shared `.ae-*` vocabulary (glance_catalog::render)
+   instead of this module's own hand-rolled markup -- these rules give the
+   catalog's classes the same visual treatment the `.glance-*` rules above
+   already gave the old markup, so the retarget is not a visual regression.
+   `.ae-hero` becomes its own nested grid (kicker/header/image-figure stay
+   siblings inside `.glance-hero`'s outer grid; h1/p/stat-badges get the same
+   20px rhythm one level deeper instead of losing it). */
+.ae-hero { display: grid; gap: 20px; }
+.ae-strong { margin: 0; color: var(--glance-ink); font-size: 16px; line-height: 1.32; font-weight: 800; overflow-wrap: anywhere; }
+.ae-dim { max-width: 76ch; margin: 0; color: var(--glance-ink); overflow-wrap: anywhere; }
+.ae-stat-badges {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 1px;
   background: var(--glance-line);
   border: 1px solid var(--glance-line);
 }
-.glance-stat { background: var(--glance-surface); padding: 12px; min-width: 0; }
-.glance-stat strong { display: block; font: 800 16px/1.2 var(--glance-font); }
-.glance-stat span { display: block; margin-top: 4px; color: var(--glance-ink-muted); font: 13px/1.3 var(--glance-mono); }
+.ae-stat-badge { background: var(--glance-surface); padding: 12px; min-width: 0; display: grid; }
+.ae-stat-value { display: block; font: 800 16px/1.2 var(--glance-font); }
+.ae-stat-label { display: block; margin-top: 4px; color: var(--glance-ink-muted); font: 13px/1.3 var(--glance-mono); }
+.ae-section { display: grid; gap: 14px; }
+.ae-section h2 {
+  margin: 0;
+  color: var(--glance-ink);
+  font-size: 16px;
+  line-height: 1.32;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+.ae-section p { max-width: 76ch; margin: 0; color: var(--glance-ink); overflow-wrap: anywhere; }
+.ae-plate { max-width: 100%; overflow-x: auto; border: 1px solid var(--glance-line); }
+.ae-table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 720px; }
+.ae-table th, .ae-table td {
+  padding: 10px;
+  vertical-align: top;
+  text-align: left;
+  border-top: 1px solid var(--glance-line);
+  overflow-wrap: anywhere;
+}
+.ae-table th { color: var(--glance-ink-muted); font: 800 13px/1.3 var(--glance-mono); }
+.ae-table tr:first-child th { border-top: 0; }
+/* The file table's `kind` column is always first (glance-gen's
+   FILE_TABLE_COLUMNS) -- `Table`'s generic column schema has no per-column
+   class, so this keeps the narrow/faint treatment structurally instead of
+   by name. */
+.ae-table td:first-child { width: 68px; color: var(--glance-ink-faint); font-family: var(--glance-mono); font-size: 13px; }
+.ae-table td code { display: block; white-space: normal; }
+.ae-table td code + code { margin-top: 4px; }
+.ae-callout { background: var(--glance-surface); padding: 14px; border-left: 3px solid var(--glance-accent); }
+.ae-callout[data-kind="hurt"] { border-left-color: var(--glance-err); }
+.ae-callout[data-kind="invariant"] { border-left-color: var(--glance-ok); }
+.ae-callout[data-kind="contract"] { border-left-color: var(--glance-warn); }
+.ae-callout h3 { margin: 0 0 6px; font-size: 16px; font-weight: 800; }
 
 .glance-narrative, .glance-callouts, .glance-file-table-section, .glance-flow-section { display: grid; gap: 14px; }
 .glance-cite {
@@ -185,27 +230,7 @@ img, svg, iframe { max-width: 100%; }
 @keyframes glance-flow-pulse { to { stroke-dashoffset: -96; } }
 @media (prefers-reduced-motion: reduce) { .glance-flow-diagram path { animation: none; } }
 
-.glance-table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid var(--glance-line); }
-.glance-file-table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 720px; }
-.glance-file-table th, .glance-file-table td {
-  padding: 10px;
-  vertical-align: top;
-  text-align: left;
-  border-top: 1px solid var(--glance-line);
-  overflow-wrap: anywhere;
-}
-.glance-file-table th { color: var(--glance-ink-muted); font: 800 13px/1.3 var(--glance-mono); }
-.glance-file-table tr:first-child th { border-top: 0; }
-.glance-file-table .kind { width: 68px; color: var(--glance-ink-faint); font-family: var(--glance-mono); font-size: 13px; }
-.glance-signatures { display: grid; gap: 4px; }
-.glance-signatures code { display: block; white-space: normal; }
-
 .glance-callout-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--glance-line); border: 1px solid var(--glance-line); }
-.glance-callout { background: var(--glance-surface); padding: 14px; border-left: 3px solid var(--glance-accent); }
-.glance-callout[data-kind="hurt"] { border-left-color: var(--glance-err); }
-.glance-callout[data-kind="invariant"] { border-left-color: var(--glance-ok); }
-.glance-callout[data-kind="contract"] { border-left-color: var(--glance-warn); }
-.glance-callout h3 { margin: 0 0 6px; font-size: 16px; font-weight: 800; }
 
 .glance-disclosure { background: var(--glance-surface); padding: 0; }
 .glance-disclosure summary { cursor: pointer; padding: 18px 28px; border-bottom: 1px solid var(--glance-line); }
@@ -221,6 +246,6 @@ img, svg, iframe { max-width: 100%; }
   .glance-theme { justify-content: start; }
   .glance-component { padding: 18px; }
   .glance-hero { min-height: auto; }
-  .glance-stat-band, .glance-callout-grid { grid-template-columns: 1fr; }
-  .glance-file-table { min-width: 620px; }
+  .ae-stat-badges, .glance-callout-grid { grid-template-columns: 1fr; }
+  .ae-table { min-width: 620px; }
 }

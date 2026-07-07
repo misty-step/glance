@@ -11,6 +11,7 @@ glance-catalog = { path = "../glance-catalog" }
 glance-check = { path = "../glance-check" }
 glance-core = { path = "../glance-core" }
 base64 = "0.22"
+chrono.workspace = true
 scraper.workspace = true
 serde.workspace = true
 serde_json = "1"

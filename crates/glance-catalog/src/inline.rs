@@ -101,19 +101,48 @@ pub fn html_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Render a run of inline nodes to HTML. `cite_href` resolves a `Cite`
-/// node's opaque `ref_id` to a concrete href -- the one seam where a
-/// consumer's own citation scheme (GitHub blob line links, local evidence
-/// anchors, or anything else) plugs in without the shared type needing to
-/// know about it.
+/// Configures how a `Cite` node renders: `href` resolves the opaque `ref_id`
+/// to a link target (the one seam every consumer already needed). `class`
+/// and `label` are the generic escape hatch a consumer opts into without any
+/// glance-specific vocabulary landing in this crate: overriding `class` lets
+/// a consumer's own stylesheet target its Cite anchors, and supplying
+/// `label` renders a `data-cite-label` attribute (e.g. for a CSS
+/// `content: attr(data-cite-label)` hover popover) -- omitted entirely when
+/// `None`, so a consumer with no popover pays nothing extra.
+pub struct CiteRender<'a> {
+    pub href: &'a dyn Fn(&str) -> String,
+    pub class: &'a str,
+    pub label: Option<&'a dyn Fn(&str) -> String>,
+}
+
+impl<'a> CiteRender<'a> {
+    /// The zero-config default: `ae-cite` class, no popover label.
+    pub fn new(href: &'a dyn Fn(&str) -> String) -> Self {
+        Self {
+            href,
+            class: "ae-cite",
+            label: None,
+        }
+    }
+}
+
+/// Render a run of inline nodes to HTML using the default `Cite` styling
+/// (`ae-cite`, no popover label). See `render_inline_nodes_styled` for the
+/// escape hatch.
 pub fn render_inline_nodes(nodes: &[InlineNode], cite_href: &dyn Fn(&str) -> String) -> String {
+    render_inline_nodes_styled(nodes, &CiteRender::new(cite_href))
+}
+
+/// Render a run of inline nodes to HTML, using `cite`'s class/label
+/// overrides for every `Cite` node encountered.
+pub fn render_inline_nodes_styled(nodes: &[InlineNode], cite: &CiteRender<'_>) -> String {
     nodes
         .iter()
-        .map(|node| render_inline_node(node, cite_href))
+        .map(|node| render_inline_node(node, cite))
         .collect()
 }
 
-fn render_inline_node(node: &InlineNode, cite_href: &dyn Fn(&str) -> String) -> String {
+fn render_inline_node(node: &InlineNode, cite: &CiteRender<'_>) -> String {
     match node {
         InlineNode::Text { text } => html_escape(text),
         InlineNode::Link { text, href } => {
@@ -124,9 +153,14 @@ fn render_inline_node(node: &InlineNode, cite_href: &dyn Fn(&str) -> String) -> 
             )
         }
         InlineNode::Cite { text, ref_id } => {
-            let href = cite_href(ref_id);
+            let href = (cite.href)(ref_id);
+            let label_attr = cite
+                .label
+                .map(|label| format!(r#" data-cite-label="{}""#, html_escape(&label(ref_id))))
+                .unwrap_or_default();
             format!(
-                r#"<a class="ae-cite" data-glance-cite="{}" href="{}">{}</a>"#,
+                r#"<a class="{}" data-glance-cite="{}"{label_attr} href="{}">{}</a>"#,
+                html_escape(cite.class),
                 html_escape(ref_id),
                 html_escape(&href),
                 html_escape(text)

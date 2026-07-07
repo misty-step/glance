@@ -9,6 +9,8 @@
 //!
 //! Run: `cargo run --example exemplar -p glance-catalog > exemplar.html`
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use glance_catalog::inline::InlineNode;
 use glance_catalog::leaf::{
@@ -102,6 +104,7 @@ fn entries() -> Vec<Entry> {
                 kind: CalloutKind::Seam,
                 title: "Where a consumer plugs in".into(),
                 body: text("Table's demoted_note is the seam a consumer uses to fold zero-signal rows into one muted line instead of dead table rows."),
+                attrs: BTreeMap::new(),
             }),
         },
         Entry {
@@ -116,6 +119,7 @@ fn entries() -> Vec<Entry> {
                     Metric { label: "PRs".into(), value: "2".into() },
                 ],
                 image_intent: None,
+                attrs: BTreeMap::new(),
             }),
         },
         Entry {
@@ -131,6 +135,7 @@ fn entries() -> Vec<Entry> {
                         InlineNode::Text { text: ".".into() },
                     ]],
                 },
+                attrs: BTreeMap::new(),
             }),
         },
         Entry {
@@ -148,9 +153,11 @@ fn entries() -> Vec<Entry> {
                         Cell { column_key: "repo".into(), value: CellValue::Text { text: "glance".into() } },
                         Cell { column_key: "commits".into(), value: CellValue::Text { text: "5".into() } },
                     ],
+                    attrs: BTreeMap::new(),
                 }],
                 empty_note: None,
                 demoted_note: Some("1 repo(s) swept with no activity: weave".into()),
+                attrs: BTreeMap::new(),
             }),
         },
         Entry {
@@ -194,6 +201,8 @@ fn main() {
             .unwrap()
             .with_timezone(&Utc),
         cite_href: &cite_href,
+        cite_class: None,
+        cite_label: None,
     };
 
     let mut body = String::new();

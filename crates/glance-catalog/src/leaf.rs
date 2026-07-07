@@ -5,6 +5,8 @@
 //! (Glass) posts with no mandated order; the structural tier
 //! (`crate::structural`) is the report grammar built on top of them.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::CatalogError;
@@ -145,6 +147,10 @@ pub struct Callout {
     pub kind: CalloutKind,
     pub title: String,
     pub body: Vec<crate::inline::InlineNode>,
+    /// Extra HTML attributes rendered on the `<article>` wrapper -- see
+    /// `crate::structural::Hero::attrs`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
 }
 
 impl Callout {
@@ -206,8 +212,32 @@ mod tests {
             kind: CalloutKind::Hurt,
             title: "sharp edge".into(),
             body: vec![InlineNode::Text { text: "ok".into() }],
+            attrs: BTreeMap::new(),
         };
         assert!(callout.validate().is_ok());
         assert_eq!(callout.kind.as_str(), "hurt");
+    }
+
+    #[test]
+    fn callout_attrs_are_a_generic_passthrough_empty_by_default() {
+        // Regression proof: glance-gen sets data-glance-section per callout
+        // kind (e.g. "where-it-can-hurt-you") without this crate knowing
+        // what the attribute means.
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "data-glance-section".to_string(),
+            "where-it-can-hurt-you".to_string(),
+        );
+        let callout = Callout {
+            kind: CalloutKind::Hurt,
+            title: "sharp edge".into(),
+            body: vec![InlineNode::Text { text: "ok".into() }],
+            attrs,
+        };
+        assert!(callout.validate().is_ok());
+        assert_eq!(
+            callout.attrs.get("data-glance-section").map(String::as_str),
+            Some("where-it-can-hurt-you")
+        );
     }
 }

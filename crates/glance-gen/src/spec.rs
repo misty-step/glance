@@ -1,49 +1,57 @@
 //! glance-gen's page spec: a directory-tour envelope (breadcrumbs,
 //! parent/child/sibling links, source-line citations resolved to GitHub blob
-//! URLs) that validates through `glance_catalog`'s shared primitives
-//! (glance-927, first slice of glance-922).
+//! URLs) that both validates AND renders through `glance_catalog`'s shared
+//! primitives (glance-927 landed validation; glance-928 unlocked rendering).
 //!
 //! Wire JSON is unchanged (`catalog.schema.json` still governs `path`/`lines`
 //! citations and the fixed `kind`/`title`/`body` callout shape --
 //! `crates/glance/src/main.rs` depends on this schema, a real external
-//! contract). `Hero` and `Callout` field validation delegates to
+//! contract). `Hero`/`Callout` validation delegates to
 //! `glance_catalog::structural`/`leaf` via small `to_catalog_*` converters;
 //! `hero.stats`' 2-4 cap is glance's own display-band rule, layered on top
 //! the same way `validate_for_kind` layers ordering rules on
-//! `glance_catalog::validate_layout`. `Narrative`'s own validate body stays
-//! (heading/paragraphs non-empty is cheaper to check directly than to
-//! convert into `glance_catalog::structural::Narrative`'s
-//! `NarrativeStatus::Ok` wrapper for).
+//! `glance_catalog::validate_layout`.
 //!
-//! Rendering stays local for Hero, Narrative, Callouts, the file table, and
-//! Disclosure -- not merely to avoid a rewrite, but because
-//! `glance_catalog::render_component` cannot reproduce three things this
-//! crate's own tests and downstream readers depend on: (1) hero's and
-//! callouts' `data-glance-section` markers, read back by
-//! `context.rs::distill_generated_page` to assemble a parent page's prompt
-//! context from an already-generated child; (2) the citation popover's
-//! `data-cite-label` attribute and `glance-cite` class (`kit.css`), which the
-//! shared crate's `Cite` renderer does not emit; (3) file-table directory
-//! cells rendered as `glance_check::directory_href` links, which need this
-//! crate's own `RenderContext` (`DirectorySnapshot` + current directory).
-//! `FileTable`/`FileRow` stay glance's own types rather than `Table`'s
-//! generic column/cell schema for the same reason -- the fixed
-//! kind/name/role/signatures/gotcha shape plus directory links and per-row
-//! citations don't fit without inventing shared-crate surface only this one
-//! consumer would use (the "arbitrating a winner where no second
-//! implementation exists" trap the crate's own docs warn about).
+//! Hero, Narrative, Callouts (per item), and the file table (as a generic
+//! `Table`) now render through `glance_catalog::render::render_component`.
+//! glance-927 named three couplings blocking this: (1) hero's and callouts'
+//! `data-glance-section` markers, read back by
+//! `context.rs::distill_generated_page`; (2) the citation popover's
+//! `data-cite-label` attribute and `glance-cite` class (`kit.css`); (3)
+//! file-table directory cells and per-row citations. glance-928 added the
+//! generic (consumer-agnostic, no glance vocabulary) escape hatches this
+//! needed: an `attrs` map on structural/leaf components (`section_attrs`
+//! below), `RenderContext::cite_class`/`cite_label` passthrough
+//! (`catalog_render_ctx`), and `CellValue::Link` + `Row::attrs` for
+//! directory-linked, citable table rows (`file_row_to_catalog`). The file
+//! table's fixed kind/name/role/signatures/gotcha shape becomes a
+//! `ColumnSpec` schema (`FILE_TABLE_COLUMNS`); the always-first `kind`
+//! column keeps its narrow/faint styling structurally
+//! (`assets/kit.css`'s `.ae-table td:first-child`), not by a bespoke class.
+//!
+//! What still renders locally, and why: the page shell (topbar/nav/theme
+//! toggle) and the `<div class="glance-component ...">` wrapper
+//! (`wrap_component`) aren't catalog concerns; Hero's kicker watermark and
+//! root-page image figure have no catalog equivalent, so they render as
+//! siblings of the catalog-rendered `<header>` (see `render_hero`);
 //! `FlowDiagram`/`ImageFigure`/`CustomHtml` have no catalog equivalent at
-//! all and stay fully local, per the same principle.
+//! all; `Disclosure`'s own `<details>` shell stays local because its
+//! children can be any of this crate's `Component` variants, not just the
+//! catalog's.
 //!
-//! Deleted: this module's own HTML-escaping (`glance_catalog::inline::html_escape`
-//! is now the sole `html_escape`), and `Hero`/`Callout`'s own
-//! field-validation bodies where `glance_catalog` already proves the same
-//! rule once.
+//! Deleted: this module's own `InlineNode` HTML rendering
+//! (`glance_catalog::inline::render_inline_nodes_styled` is now the sole
+//! renderer, reached via `cite_href_from_ref_id`/`catalog_render_ctx`), the
+//! hand-rolled Hero/Narrative/Callout/FileTable markup, and the
+//! `.glance-hero-summary`/`.glance-stat-*`/`.glance-file-table`/
+//! `.glance-signatures`/`.glance-callout` (non-grid) CSS rules those used
+//! (`assets/kit.css`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use glance_core::DirectorySnapshot;
 use serde::{Deserialize, Serialize};
 
@@ -231,6 +239,7 @@ fn to_catalog_hero(hero: &Hero) -> glance_catalog::structural::Hero {
         summary: to_catalog_inline_nodes(&hero.summary),
         stats: hero.stats.iter().map(to_catalog_metric).collect(),
         image_intent: None,
+        attrs: BTreeMap::new(),
     }
 }
 
@@ -309,35 +318,6 @@ fn to_catalog_inline_node(node: &InlineNode) -> glance_catalog::InlineNode {
 
 fn to_catalog_inline_nodes(nodes: &[InlineNode]) -> Vec<glance_catalog::InlineNode> {
     nodes.iter().map(to_catalog_inline_node).collect()
-}
-
-fn render_inline_nodes(nodes: &[InlineNode], context: &RenderContext<'_>) -> String {
-    nodes
-        .iter()
-        .map(|node| render_inline_node(node, context))
-        .collect()
-}
-
-fn render_inline_node(node: &InlineNode, context: &RenderContext<'_>) -> String {
-    match node {
-        InlineNode::Text { text } => html_escape(text),
-        InlineNode::Link { text, href } => format!(
-            r#"<a href="{}">{}</a>"#,
-            html_escape(href),
-            html_escape(text)
-        ),
-        InlineNode::Cite { text, path, lines } => {
-            let raw = format!("{path}:{lines}");
-            let href = source_href(context, path, lines);
-            format!(
-                r#"<a class="glance-cite" data-glance-cite="{}" data-cite-label="{}" href="{}">{}</a>"#,
-                html_escape(&raw),
-                html_escape(&raw),
-                html_escape(&href),
-                html_escape(text)
-            )
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +475,7 @@ fn to_catalog_callout(callout: &Callout) -> glance_catalog::leaf::Callout {
         kind: to_catalog_callout_kind(callout.kind),
         title: callout.title.clone(),
         body: to_catalog_inline_nodes(&callout.body),
+        attrs: BTreeMap::new(),
     }
 }
 
@@ -514,17 +495,6 @@ pub enum CalloutKind {
     Hurt,
     Invariant,
     Contract,
-}
-
-impl CalloutKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Seam => "seam",
-            Self::Hurt => "hurt",
-            Self::Invariant => "invariant",
-            Self::Contract => "contract",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -815,50 +785,116 @@ fn render_component(
     }
 }
 
-/// Rendering stays local -- see the module doc comment; field validation
-/// still delegates to `glance_catalog::structural::Hero::validate` via
-/// `to_catalog_hero`.
-fn render_hero(hero: &Hero, context: &RenderContext<'_>, flow_edges: &str) -> String {
-    let mut html = format!(
-        r#"<section class="glance-component glance-hero" data-glance-component="hero" data-glance-section="what-this-is"><div class="glance-kicker">{}</div><h1>{}</h1><p class="glance-hero-summary">{}"#,
-        html_escape(CATALOG_VERSION),
-        html_escape(&hero.title),
-        render_inline_nodes(&hero.summary, context)
-    );
-    html.push_str("</p>");
-    if !hero.stats.is_empty() {
-        html.push_str(r#"<div class="glance-stat-band">"#);
-        for stat in &hero.stats {
-            html.push_str(&format!(
-                r#"<div class="glance-stat"><strong>{}</strong><span>{}</span></div>"#,
-                html_escape(&stat.value),
-                html_escape(&stat.label)
-            ));
-        }
-        html.push_str("</div>");
+/// Resolves a `glance_catalog::InlineNode::Cite`'s opaque `ref_id` (always
+/// `path:lines`, see `to_catalog_inline_node`) back to a concrete href via
+/// this crate's own GitHub-blob-or-local-anchor `source_href` -- the same
+/// citation scheme rendering always used, now reached through
+/// `glance_catalog::render::RenderContext::cite_href` instead of a local
+/// match arm. `rsplit_once` is safe: `lines` (glance_check's range grammar)
+/// never contains `:`, only a real path could, and repo-relative paths
+/// don't either.
+fn cite_href_from_ref_id(context: &RenderContext<'_>, ref_id: &str) -> String {
+    match ref_id.rsplit_once(':') {
+        Some((path, lines)) => source_href(context, path, lines),
+        None => format!("#source-{}", slugify(ref_id)),
     }
+}
+
+/// The `glance_catalog::render::RenderContext` every delegated component
+/// (Hero, Narrative, Callout, the file table) renders through:
+/// `cite_class`/`cite_label` reproduce the citation popover
+/// (`class="glance-cite" data-cite-label="..."`, `kit.css`) via the generic
+/// passthrough glance-928 adds, instead of glance-gen keeping its own
+/// `InlineNode::Cite` render arm. `now` is unused by every kind glance-gen
+/// delegates (only `Timeline`, which glance-gen never emits, reads it).
+fn catalog_render_ctx<'a>(
+    cite_href: &'a dyn Fn(&str) -> String,
+    cite_label: &'a dyn Fn(&str) -> String,
+) -> glance_catalog::render::RenderContext<'a> {
+    glance_catalog::render::RenderContext {
+        now: Utc::now(),
+        cite_href,
+        cite_class: Some("glance-cite"),
+        cite_label: Some(cite_label),
+    }
+}
+
+fn section_attrs(section: &str) -> BTreeMap<String, String> {
+    let mut attrs = BTreeMap::new();
+    attrs.insert("data-glance-section".to_string(), section.to_string());
+    attrs
+}
+
+/// The `<div class="glance-component ...">` wrapper every top-level
+/// component keeps (see `assets/kit.css`'s `.glance-main`/`.glance-component`
+/// grid, which every direct child must carry) around what's now a
+/// `glance_catalog::render::render_component` call. `group_marker` is always
+/// set here, on this *direct child* of `.glance-main` -- never left to
+/// whatever marker the catalog's nested render happens to emit one level
+/// deeper, because `glance_check::validate_page_contract` scans page order
+/// via the strict selector `.glance-main > [data-glance-component]`
+/// (grep-verified, not narrated): a marker on a grandchild is invisible to
+/// it.
+fn wrap_component(extra_class: &str, group_marker: &str, inner: &str) -> String {
+    format!(
+        r#"<div class="glance-component {extra_class}" data-glance-component="{group_marker}">{inner}</div>"#
+    )
+}
+
+/// Delegates to `glance_catalog::structural::Hero` via `to_catalog_hero`
+/// (glance-928: `data-glance-section` rides the catalog's generic `attrs`
+/// map, the citation popover rides `cite_class`/`cite_label`). The kicker
+/// watermark and root-page image figure have no equivalent in the catalog's
+/// generic Hero -- both glance-only extras -- so they render as siblings of
+/// the catalog-rendered `<header>` inside the same `.glance-component
+/// .glance-hero` grid rather than as its children; `kit.css` gives that grid
+/// gap to both nesting levels (`.glance-hero` and the new `.ae-hero`), so the
+/// visible spacing is unchanged even though the DOM nests one level deeper.
+fn render_hero(hero: &Hero, context: &RenderContext<'_>, flow_edges: &str) -> String {
+    let cite_href = |ref_id: &str| cite_href_from_ref_id(context, ref_id);
+    let cite_label = |ref_id: &str| ref_id.to_string();
+    let catalog_hero = glance_catalog::structural::Hero {
+        attrs: section_attrs("what-this-is"),
+        ..to_catalog_hero(hero)
+    };
+    let rendered = glance_catalog::render::render_component(
+        &glance_catalog::Component::Hero(catalog_hero),
+        &catalog_render_ctx(&cite_href, &cite_label),
+    );
+    let mut html = format!(
+        r#"<div class="glance-kicker">{}</div>{rendered}"#,
+        html_escape(CATALOG_VERSION)
+    );
     if let Some(request) = &hero.image_request {
         html.push_str(&render_image_request_figure(request, context, flow_edges));
     }
-    html.push_str("</section>");
-    html
+    wrap_component("glance-hero", "hero", &html)
 }
 
-/// Rendering stays local to preserve `data-glance-section="role-in-the-whole"`
-/// -- unread by `distill_generated_page` today, kept for symmetry rather than
-/// silently dropping a marker some other reader may depend on.
+/// Delegates to `glance_catalog::structural::Narrative` -- see
+/// `render_hero`'s doc comment for the shared `attrs`/cite-passthrough
+/// pattern. `data-glance-section="role-in-the-whole"` is unread by
+/// `distill_generated_page` today, kept for symmetry rather than silently
+/// dropping a marker some other reader may depend on.
 fn render_narrative(narrative: &Narrative, context: &RenderContext<'_>) -> String {
-    let mut html = format!(
-        r#"<section class="glance-component glance-narrative" data-glance-component="narrative" data-glance-section="role-in-the-whole"><h2 class="glance-section-title">{}</h2>"#,
-        html_escape(&narrative.heading)
+    let cite_href = |ref_id: &str| cite_href_from_ref_id(context, ref_id);
+    let cite_label = |ref_id: &str| ref_id.to_string();
+    let catalog_narrative = glance_catalog::structural::Narrative {
+        heading: narrative.heading.clone(),
+        status: glance_catalog::structural::NarrativeStatus::Ok {
+            paragraphs: narrative
+                .paragraphs
+                .iter()
+                .map(|paragraph| to_catalog_inline_nodes(paragraph))
+                .collect(),
+        },
+        attrs: section_attrs("role-in-the-whole"),
+    };
+    let rendered = glance_catalog::render::render_component(
+        &glance_catalog::Component::Narrative(catalog_narrative),
+        &catalog_render_ctx(&cite_href, &cite_label),
     );
-    for paragraph in &narrative.paragraphs {
-        html.push_str("<p>");
-        html.push_str(&render_inline_nodes(paragraph, context));
-        html.push_str("</p>");
-    }
-    html.push_str("</section>");
-    html
+    wrap_component("glance-narrative", "narrative", &rendered)
 }
 
 /// Rough monospace glyph width at the 13px flow-diagram label font
@@ -960,65 +996,125 @@ fn assign_label_lanes(edges: &[(i32, i32, i32, i32, i32, &str)]) -> Vec<i32> {
 }
 
 /// Rendering stays local -- see the module doc comment.
+const FILE_TABLE_COLUMNS: [&str; 5] = ["kind", "name", "role", "signatures", "gotcha"];
+
+/// Delegates to `glance_catalog::structural::Table` -- the fixed
+/// kind/name/role/signatures/gotcha shape becomes a `ColumnSpec` schema, the
+/// directory-href name cell becomes `CellValue::Link` (glance-928's
+/// "linkable table cells", covering `glance_check::directory_href` without
+/// this crate's own `RenderContext` leaking into the shared crate), and the
+/// per-row citation marker rides `Row::attrs` (glance-928's generic
+/// passthrough) instead of a bespoke `Table` extension only this crate would
+/// use. `kind` is always the first column -- `kit.css`'s `.ae-table
+/// td:first-child` rule keeps its old narrow/faint treatment structurally,
+/// not by name.
 fn render_file_table(table: &FileTable, context: &RenderContext<'_>) -> String {
-    let mut html = String::from(
-        r#"<section class="glance-component glance-file-table-section" data-glance-component="file_table" data-glance-section="composition"><h2 class="glance-section-title">Files to know</h2><div class="glance-table-wrap"><table class="glance-file-table"><tr><th class="kind">kind</th><th>name</th><th>role</th><th>signatures</th><th>gotcha</th></tr>"#,
-    );
-    for row in &table.rows {
-        let cite_attr = row
-            .cite
-            .as_ref()
-            .map(|cite| format!(r#" data-glance-cite="{}""#, html_escape(&cite.raw())))
-            .unwrap_or_default();
-        html.push_str(&format!(
-            r#"<tr{cite_attr}><td class="kind">{}</td><td>{}</td><td>{}</td><td><div class="glance-signatures">{} </div></td><td>{}</td></tr>"#,
-            match row.kind {
-                FileRowKind::File => "file",
-                FileRowKind::Dir => "dir",
-            },
-            render_file_name(row, context),
-            html_escape(&row.role),
-            render_signatures(&row.signatures),
-            row.gotcha
-                .as_ref()
-                .map(|gotcha| html_escape(gotcha))
-                .unwrap_or_else(|| "none".to_owned())
-        ));
-    }
-    html.push_str("</table></div></section>");
-    html
-}
-
-fn render_file_name(row: &FileRow, context: &RenderContext<'_>) -> String {
-    if row.kind == FileRowKind::Dir {
-        let target = PathBuf::from(&row.name);
-        format!(
-            r#"<a href="{}">{}</a>"#,
-            html_escape(&glance_check::directory_href(context.directory, &target)),
-            html_escape(&row.name)
-        )
-    } else {
-        html_escape(&row.name)
-    }
-}
-
-fn render_signatures(signatures: &[String]) -> String {
-    if signatures.is_empty() {
-        return r#"<span class="glance-muted">none</span>"#.to_owned();
-    }
-    signatures
+    let columns = FILE_TABLE_COLUMNS
         .iter()
-        .map(|signature| format!("<code>{}</code>", html_escape(signature)))
-        .collect::<Vec<_>>()
-        .join("")
+        .map(|key| glance_catalog::structural::ColumnSpec {
+            key: (*key).to_string(),
+            label: (*key).to_string(),
+            numeric: false,
+            emphasize: false,
+        })
+        .collect();
+    let rows = table
+        .rows
+        .iter()
+        .map(|row| file_row_to_catalog(row, context))
+        .collect();
+    let catalog_table = glance_catalog::structural::Table {
+        heading: "Files to know".to_string(),
+        columns,
+        rows,
+        empty_note: Some("No files tracked for this directory.".to_string()),
+        demoted_note: None,
+        attrs: section_attrs("composition"),
+    };
+    let rendered = glance_catalog::render::render_component(
+        &glance_catalog::Component::Table(catalog_table),
+        // The file table never carries a `Cite` inline node (citations are a
+        // row-level `data-glance-cite` marker, not cell text), so a cite
+        // resolver that's never called is fine here.
+        &catalog_render_ctx(&|_| String::new(), &|ref_id| ref_id.to_string()),
+    );
+    wrap_component("glance-file-table-section", "file_table", &rendered)
 }
 
-/// Rendering stays local -- see the module doc comment; title/body still
-/// validate through `glance_catalog::leaf::Callout::validate` (see
-/// `to_catalog_callout`).
+fn file_row_to_catalog(
+    row: &FileRow,
+    context: &RenderContext<'_>,
+) -> glance_catalog::structural::Row {
+    let mut attrs = BTreeMap::new();
+    if let Some(cite) = &row.cite {
+        attrs.insert("data-glance-cite".to_string(), cite.raw());
+    }
+    let name_value = if row.kind == FileRowKind::Dir {
+        glance_catalog::structural::CellValue::Link {
+            text: row.name.clone(),
+            href: glance_check::directory_href(context.directory, &PathBuf::from(&row.name)),
+        }
+    } else {
+        glance_catalog::structural::CellValue::Text {
+            text: row.name.clone(),
+        }
+    };
+    let signatures_value = if row.signatures.is_empty() {
+        glance_catalog::structural::CellValue::Text {
+            text: "none".to_string(),
+        }
+    } else {
+        glance_catalog::structural::CellValue::Code {
+            items: row.signatures.clone(),
+        }
+    };
+    let cell = |column_key: &str, value: glance_catalog::structural::CellValue| {
+        glance_catalog::structural::Cell {
+            column_key: column_key.to_string(),
+            value,
+        }
+    };
+    glance_catalog::structural::Row {
+        cells: vec![
+            cell(
+                "kind",
+                glance_catalog::structural::CellValue::Text {
+                    text: match row.kind {
+                        FileRowKind::File => "file",
+                        FileRowKind::Dir => "dir",
+                    }
+                    .to_string(),
+                },
+            ),
+            cell("name", name_value),
+            cell(
+                "role",
+                glance_catalog::structural::CellValue::Text {
+                    text: row.role.clone(),
+                },
+            ),
+            cell("signatures", signatures_value),
+            cell(
+                "gotcha",
+                glance_catalog::structural::CellValue::Text {
+                    text: row.gotcha.clone().unwrap_or_else(|| "none".to_string()),
+                },
+            ),
+        ],
+        attrs,
+    }
+}
+
+/// Each item delegates individually to `glance_catalog::leaf::Callout` via
+/// `to_catalog_callout` -- the group wrapper (`h2` + grid) stays local since
+/// the catalog has no "list of callouts" primitive, only the one item
+/// (glance-928: same `attrs`/cite pattern as `render_hero`/`render_narrative`).
 fn render_callouts(callouts: &Callouts, context: &RenderContext<'_>) -> String {
+    let cite_href = |ref_id: &str| cite_href_from_ref_id(context, ref_id);
+    let cite_label = |ref_id: &str| ref_id.to_string();
+    let ctx = catalog_render_ctx(&cite_href, &cite_label);
     let mut html = String::from(
-        r#"<section class="glance-component glance-callouts" data-glance-component="callouts"><h2 class="glance-section-title">Seams and sharp edges</h2><div class="glance-callout-grid">"#,
+        r#"<h2 class="glance-section-title">Seams and sharp edges</h2><div class="glance-callout-grid">"#,
     );
     for item in &callouts.items {
         let section = match item.kind {
@@ -1026,15 +1122,17 @@ fn render_callouts(callouts: &Callouts, context: &RenderContext<'_>) -> String {
             CalloutKind::Seam | CalloutKind::Contract => "seams-contracts",
             CalloutKind::Invariant => "role-in-the-whole",
         };
-        html.push_str(&format!(
-            r#"<article class="glance-callout" data-kind="{}" data-glance-section="{section}"><h3>{}</h3><p>{}</p></article>"#,
-            item.kind.as_str(),
-            html_escape(&item.title),
-            render_inline_nodes(&item.body, context)
+        let catalog_callout = glance_catalog::leaf::Callout {
+            attrs: section_attrs(section),
+            ..to_catalog_callout(item)
+        };
+        html.push_str(&glance_catalog::render::render_component(
+            &glance_catalog::Component::Callout(catalog_callout),
+            &ctx,
         ));
     }
-    html.push_str("</div></section>");
-    html
+    html.push_str("</div>");
+    wrap_component("glance-callouts", "callouts", &html)
 }
 
 fn render_disclosure(disclosure: &Disclosure, context: &RenderContext<'_>) -> String {

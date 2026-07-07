@@ -7,11 +7,25 @@
 //! column schema; fleet-retro's `Timeline` and Sideshow's half-finished
 //! `trace` merge into one `Timeline` with an optional expandable `detail`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::inline::{InlineNode, render_inline_nodes, validate_inline_nodes};
+use crate::inline::{CiteRender, InlineNode, render_inline_nodes_styled, validate_inline_nodes};
 use crate::leaf::Metric;
 use crate::{CatalogError, Component};
+
+/// Render a component's `attrs` map as a run of HTML attributes (leading
+/// space included, empty string when `attrs` is empty) -- the generic,
+/// consumer-agnostic escape hatch every structural component's `attrs` field
+/// renders through. Keys are trusted (a consumer's own constant, e.g.
+/// `"data-glance-section"`), values are escaped like any other content.
+pub fn render_attrs(attrs: &BTreeMap<String, String>) -> String {
+    attrs
+        .iter()
+        .map(|(key, value)| format!(r#" {key}="{}""#, crate::inline::html_escape(value)))
+        .collect()
+}
 
 /// Title + summary + metric chips. Merges glance-next's `Hero` (title,
 /// summary, stats, optional image_request) and fleet-retro's `Hero` +
@@ -36,6 +50,13 @@ pub struct Hero {
     pub stats: Vec<Metric>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_intent: Option<String>,
+    /// Extra HTML attributes rendered on the `<header>` wrapper -- e.g. a
+    /// consumer that reads back its own generated pages by section (glance's
+    /// `distill_generated_page`) sets `data-glance-section` here instead of
+    /// this crate growing a glance-specific field. Empty by default, no
+    /// consumer pays for what it doesn't set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
 }
 
 impl Hero {
@@ -63,6 +84,10 @@ impl Hero {
 pub struct Narrative {
     pub heading: String,
     pub status: NarrativeStatus,
+    /// Extra HTML attributes rendered on the `<section>` wrapper -- see
+    /// `Hero::attrs`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +165,13 @@ pub struct Cell {
 #[serde(deny_unknown_fields)]
 pub struct Row {
     pub cells: Vec<Cell>,
+    /// Extra HTML attributes rendered on the `<tr>` -- e.g. glance-gen's
+    /// `FileTable` marks a row with its own `data-glance-cite` (the
+    /// citation gate scans `[data-glance-cite]` on any element, not just
+    /// inline `Cite` anchors), which this crate has no business knowing the
+    /// meaning of. See `Hero::attrs`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
 }
 
 /// Generic labeled rows -- merges glance-next's `FileTable` (kind, name,
@@ -162,6 +194,10 @@ pub struct Table {
     /// `quiet_repos`, designer critique finding #4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub demoted_note: Option<String>,
+    /// Extra HTML attributes rendered on the `<section>` wrapper -- see
+    /// `Hero::attrs`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
 }
 
 impl Table {
@@ -306,11 +342,11 @@ pub fn render_cell(value: &CellValue) -> String {
 
 pub fn render_narrative_paragraphs(
     paragraphs: &[Vec<InlineNode>],
-    cite_href: &dyn Fn(&str) -> String,
+    cite: &CiteRender<'_>,
 ) -> String {
     paragraphs
         .iter()
-        .map(|paragraph| format!("<p>{}</p>", render_inline_nodes(paragraph, cite_href)))
+        .map(|paragraph| format!("<p>{}</p>", render_inline_nodes_styled(paragraph, cite)))
         .collect()
 }
 
@@ -332,6 +368,7 @@ mod tests {
                 value: "3".into(),
             }],
             image_intent: None,
+            attrs: BTreeMap::new(),
         };
         assert!(hero.validate().is_ok());
     }
@@ -354,6 +391,7 @@ mod tests {
                 })
                 .collect(),
             image_intent: None,
+            attrs: BTreeMap::new(),
         };
         assert!(hero.validate().is_ok());
     }
@@ -366,6 +404,7 @@ mod tests {
             status: NarrativeStatus::Unavailable {
                 reason: String::new(),
             },
+            attrs: BTreeMap::new(),
         };
         assert!(narrative.validate().is_err());
     }
@@ -385,9 +424,11 @@ mod tests {
                     column_key: "commits".into(),
                     value: CellValue::Text { text: "5".into() },
                 }],
+                attrs: BTreeMap::new(),
             }],
             empty_note: None,
             demoted_note: None,
+            attrs: BTreeMap::new(),
         };
         assert!(table.validate().is_err());
     }
@@ -405,6 +446,7 @@ mod tests {
             rows: vec![],
             empty_note: None,
             demoted_note: None,
+            attrs: BTreeMap::new(),
         };
         assert!(table.validate().is_err());
         let with_note = Table {
@@ -448,9 +490,11 @@ mod tests {
                         },
                     },
                 ],
+                attrs: BTreeMap::new(),
             }],
             empty_note: None,
             demoted_note: None,
+            attrs: BTreeMap::new(),
         };
         assert!(file_table.validate().is_ok());
 
@@ -484,9 +528,11 @@ mod tests {
                         value: CellValue::Text { text: "5".into() },
                     },
                 ],
+                attrs: BTreeMap::new(),
             }],
             empty_note: None,
             demoted_note: Some("2 repo(s) swept with no activity: glass, canary".into()),
+            attrs: BTreeMap::new(),
         };
         assert!(repo_table.validate().is_ok());
     }
@@ -527,6 +573,7 @@ mod tests {
                 summary: text("s"),
                 stats: vec![],
                 image_intent: None,
+                attrs: BTreeMap::new(),
             })],
         };
         assert!(with_hero.validate().is_err());
