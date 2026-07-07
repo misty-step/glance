@@ -2,17 +2,19 @@
 :root {
   --ae-accent: #2643d0;
   --ae-accent-dark: #8c9eff;
+  --ae-w-bold: var(--ae-w-black);
 }
 
 .msk-bar,
 .msk-footer {
   width: min(var(--ae-measure-wide), 100% - 5rem);
+  position: relative;
+  z-index: 1;
 }
 
-.msk-actions {
-  display: inline-flex;
-  align-items: baseline;
-  gap: var(--ae-space-5);
+.ae-logo .ae-name {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
 }
 
 .msk-nav {
@@ -29,6 +31,55 @@
   width: min(var(--ae-measure-wide), 100%);
   display: grid;
   gap: var(--ae-space-8);
+}
+
+.msk-home {
+  position: relative;
+  background: var(--ae-surface);
+}
+
+.msk-home .ae-stage {
+  overflow: hidden;
+}
+
+.msk-hero-image {
+  position: absolute;
+  inset: 0;
+  background-image: url('assets/hero.jpg');
+  background-position: center;
+  background-size: cover;
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.msk-hero-stage {
+  position: relative;
+  z-index: 1;
+  justify-content: flex-end;
+}
+
+.msk-hero-stage > * {
+  margin-block: 0;
+}
+
+.msk-mural-panel {
+  box-sizing: border-box;
+  width: min(24rem, 100%);
+  margin-block: auto var(--ae-space-8);
+  padding: var(--ae-space-6);
+  display: grid;
+  gap: var(--ae-space-5);
+  border: 1px solid var(--ae-line);
+  background: color-mix(in srgb, var(--ae-surface) 85%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.msk-mural-panel .ae-h {
+  font-size: clamp(1.7rem, 2.8vw, 2.6rem);
+  line-height: 1.25;
+  font-weight: var(--ae-w-bold);
+  letter-spacing: -0.01em;
+  max-width: 24ch;
 }
 
 .msk-hero {
@@ -98,7 +149,19 @@
 }
 
 .msk-footer {
-  align-items: baseline;
+  align-items: center;
+}
+
+.msk-footer-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ae-space-4);
+}
+
+.msk-github {
+  display: inline-flex;
+  color: inherit;
+  text-decoration: none;
 }
 
 .msk-zoom {
@@ -146,10 +209,20 @@
     width: min(var(--ae-measure), 100% - 2rem);
   }
 
-  .msk-actions,
   .msk-nav {
     flex-wrap: wrap;
     gap: var(--ae-space-3);
+  }
+
+  .msk-home .msk-nav {
+    max-width: 13rem;
+    justify-content: flex-end;
+  }
+
+  .msk-mural-panel {
+    width: 100%;
+    margin-block: auto var(--ae-space-5);
+    padding: var(--ae-space-5);
   }
 
   .msk-gallery {

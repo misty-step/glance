@@ -4,6 +4,28 @@ This file is the product's public-site brand contract. Keep it short and exact:
 agents and humans should be able to update `site/` from this file without
 inventing a second design system.
 
+## Fleet Lock
+
+- Lock: operator lock-in 2026-07-07, `misty-step-936`.
+- Tagline and homepage `h1`: `Understand your codebase.`
+- Layout: Mural.
+- Hero image: `site/assets/hero.jpg`.
+- Image provenance: generated for the Misty Step fleet lock with `gpt-image-1`
+  using the Misty Step fresco language, staged as `glance-hero.jpg`.
+- Background opacity: `0.35`.
+- Homepage structure: hero only, one viewport, no scroll.
+- CTA: `<a class="ae-button" href="get-started.html">Get started</a>`.
+
+## Chrome
+
+- Header: Lucide `scan-search` mark in `.ae-app-mark`, uppercase wordmark, and
+  nav links `features`, `get started`, `changelog`, `github`.
+- GitHub link: `https://github.com/misty-step/glance`.
+- Footer: mode toggle on the left; right side reads `a Misty Step project`
+  with `Misty Step` linked to `https://mistystep.io`, followed by an inline
+  GitHub SVG icon link.
+- No bare URL text, email, copyright line, or Weave footer link.
+
 ## Brand Voice
 
 - Plain-spoken, concrete, and operator-facing.
@@ -11,10 +33,6 @@ inventing a second design system.
 - Avoid marketing fog, mascot language, and decorative claims.
 - The differentiator is the honesty gate, not the writing: say "every claim
   is cited and machine-checked," not "AI-powered documentation."
-
-## Pitch One-Liner
-
-`Glance turns a repository into a place you can walk through instead of a pile you have to read — every claim on every page cited to source and machine-verified before it ships.`
 
 ## Lucide Mark
 
@@ -55,17 +73,8 @@ stopped it (a single interior/root call stalled past four minutes); the
 gallery honestly shows leaf-tier output rather than claiming a root page
 that was never generated.
 
-## Footer Links
-
-- Misty Step: `https://mistystep.io`
-- GitHub: repo is currently **private** — no public GitHub link until the
-  operator flips visibility.
-- No Weave link — Glance is a documentation/understanding product, not a
-  Weave-family execution-plane app.
-
 ## Release Notes Rule
 
 `site/changelog.html` is user-facing. Glance has no tagged release and no
 Landmark export yet — the page says so honestly and points at real recent
-commits (the placeholder-image fix, the citation-format hardening) instead
-of inventing a version number.
+commits and site locks instead of inventing a version number.

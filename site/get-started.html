@@ -3,8 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Glance release notes</title>
-    <meta name="description" content="User-facing release notes for Glance." />
+    <title>Get started with Glance</title>
+    <meta
+      name="description"
+      content="Verified local commands for building and running the Glance CLI."
+    />
     <script>
       try {
         var m = localStorage.getItem('ae-mode');
@@ -66,100 +69,77 @@
         </a>
         <nav class="ae-chrome msk-nav" aria-label="Site">
           <a href="features.html">features</a>
-          <a href="get-started.html">get started</a>
-          <a href="changelog.html" aria-current="page">changelog</a>
+          <a href="get-started.html" aria-current="page">get started</a>
+          <a href="changelog.html">changelog</a>
           <a href="https://github.com/misty-step/glance">github</a>
         </nav>
       </header>
 
-      <main class="ae-stage ae-stage-scroll">
-        <article class="ae-doc msk-page" aria-labelledby="release-notes-title">
-          <h1 id="release-notes-title">Release notes</h1>
+      <main class="ae-stage ae-stage-scroll" id="content">
+        <article class="ae-doc msk-page" aria-labelledby="start-title">
+          <h1 id="start-title">Get started</h1>
           <p class="ae-lede">
-            Glance has no tagged release yet. These notes track real, dated
-            commits to the repo — including the fixes behind this site's own
-            screenshots.
+            Glance is a Rust workspace. The commands below were verified
+            against the current CLI surface and come from the repo README and
+            SKILL.md.
           </p>
 
-          <section class="msk-release">
-            <p class="ae-chrome">2026-07-07 - locked fleet site</p>
-            <h2>Public fleet chrome landed</h2>
-            <ul>
-              <li>
-                Rebuilt the homepage to the fleet lock-in: mural layout,
-                exact tagline, locked hero image, and the shared Misty Step
-                footer.
-              </li>
-              <li>
-                Glance is public, so the header and footer now link to
-                <a href="https://github.com/misty-step/glance"
-                  >github.com/misty-step/glance</a
-                >.
-              </li>
-            </ul>
+          <section class="msk-section" aria-labelledby="build-title">
+            <h2 id="build-title">Build the CLI</h2>
+            <pre><code>git clone https://github.com/misty-step/glance.git
+cd glance
+cargo build -p glance</code></pre>
             <p class="ae-status">
               <svg class="ae-icon ae-ok" data-lucide="circle-check">
                 <use href="#i-circle-check" />
               </svg>
               <span class="ae-status-label"
-                >Evidence: operator lock-in 2026-07-07, misty-step-936.</span
+                >Verified with <code>cargo run -p glance -- --help</code>.</span
               >
             </p>
           </section>
 
-          <section class="msk-release">
-            <p class="ae-chrome">2026-07-04 - honesty fixes</p>
-            <h2>The gate stops shipping broken pages</h2>
-            <ul>
-              <li>
-                A generated page can no longer ship with a placeholder image
-                or an empty-subject sentence — both used to slip through
-                silently on a bad model response.
-              </li>
-              <li>
-                Flow-diagram edge labels now stagger so converging edges never
-                overlap into unreadable text.
-              </li>
-              <li>
-                Page-spec rendering moved to a validated JSON contract
-                (<code>glance-catalog-001</code>) instead of raw generated
-                HTML, closing off a class of malformed output at the source.
-              </li>
-            </ul>
-            <p class="ae-status">
-              <svg class="ae-icon ae-ok" data-lucide="circle-check">
-                <use href="#i-circle-check" />
-              </svg>
-              <span class="ae-status-label"
-                >Evidence: <code>fix: never ship a placeholder image or
-                empty-subject sentence</code> and <code>fix: stagger
-                flow-diagram edge labels</code> on <code>main</code>.</span
-              >
+          <section class="msk-section" aria-labelledby="first-run-title">
+            <h2 id="first-run-title">First local run</h2>
+            <pre><code>cargo run -p glance -- plan --root /path/to/source --changed src/lib.rs
+cargo run -p glance -- run --config glance.toml
+cargo run -p glance -- check --source-root /path/to/source --source-sha &lt;sha&gt; site/index.html
+cargo run -p glance -- serve-local --site-root site --port 4173</code></pre>
+            <p>
+              The tracked default config uses the deterministic mock provider
+              so local gates and smoke runs do not depend on live secrets. Real
+              provider mode is opt-in and uses environment credentials.
             </p>
           </section>
 
-          <section class="msk-release">
-            <p class="ae-chrome">2026-07-05 - public site</p>
-            <h2>Public site launched</h2>
-            <ul>
-              <li>
-                Added a Misty Step branded public site built from a real
-                self-run of the current, post-fix codebase — a screenshot
-                gallery showing Glance narrating its own repository, its own
-                citation gate passing, and a real cited page.
-              </li>
-              <li>
-                The repo has since been made public, and the fleet chrome now
-                links to the public GitHub repository.
-              </li>
-            </ul>
-            <p class="ae-status">
-              <svg class="ae-icon ae-ok" data-lucide="circle-check">
-                <use href="#i-circle-check" />
-              </svg>
-              <span class="ae-status-label"
-                >Evidence: GitHub Pages deploy (pending visibility).</span
+          <section class="msk-section" aria-labelledby="publish-title">
+            <h2 id="publish-title">Publish deliberately</h2>
+            <pre><code>cargo run -p glance -- publish \
+  --site-dir site \
+  --source-owner misty-step \
+  --source-name demo \
+  --source-sha &lt;sha&gt; \
+  --mode branch \
+  --branch glance/source-pr-12 \
+  --source-pr-title "Source PR title"</code></pre>
+            <p>
+              The SKILL.md contract defaults to branch mode unless the operator
+              explicitly authorizes direct master publishing.
+            </p>
+          </section>
+
+          <section class="msk-section" aria-labelledby="more-title">
+            <h2 id="more-title">Reference surfaces</h2>
+            <p>
+              Read the
+              <a href="https://github.com/misty-step/glance/tree/main/docs"
+                >docs/ directory</a
               >
+              for producer and image details, and
+              <a href="https://github.com/misty-step/glance/blob/main/SKILL.md"
+                >SKILL.md</a
+              >
+              for the MCP and operator workflow contract.
             </p>
           </section>
         </article>
